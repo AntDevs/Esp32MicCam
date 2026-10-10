@@ -1,0 +1,19 @@
+I2S ESP32 Speaker Kit Built-in Audio Amplifier, Plug & Play for ESP32 Raspberry Pi, Compatible with MAX98357A MAX98357 NS4168
+
+https://github.com/nulllaborg/i2s_audio_amplifier_module
+
+
+The I2S audio amplifier module uses the NS4168 as the main control chip. 
+It is a high-efficiency, low-noise and highly integrated Class D audio 
+power amplifier module, which is especially suitable for portable audio 
+devices with high requirements for power consumption and anti-interference. 
+Its I2S digital input, anti-distortion function and rich protection mechanisms 
+endow it with broad application prospects in consumer electronics products.
+
+
+Product Name: I2S Audio Amplifier Module
+Operating Voltage: 3.0V~5.5V
+Port: PH2.0
+Output Power: 2.5W (VDD = 5V, RL = 4Ω)
+Size: 392210mm
+Packaging Process: eSOP8 Package

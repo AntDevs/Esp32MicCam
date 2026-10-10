@@ -1,0 +1,44 @@
+Seeed Studio XIAO ESP32 S3 Sense: Seeeduino Xiao ESP32S3 Sense, OV3660 Camera Dev Board, 2.4GHz Wi-Fi, BLE, Microphone, for Ardui
+
+https://www.seeedstudio.com/XIAO-ESP32S3-Sense-p-5639.html
+
+https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
+
+
+Processor: ESP32-S3R8 Xtensa LX7 dual-core,32-bit processor that operates at up to 240 MHZ
+camera sensor: oV3660 full 1600*1200 resolution
+mem: On-chip 8M PSRAM & 8MB Flash Onboard SD Card Slot supporting 32GB FAT
+
+// *****************************************************************************************//
+Features:
+
+🌱 Powerful MCU Board
+
+      Incorporate the ESP32S3 32-bit, dual-core, Xtensa processor chip operating up to 240 MHz, mounted multiple development ports, Arduino / MicroPython supported.
+
+🌱 Advanced Functionality
+
+      Detachable OV3660 camera sensor for 2048*1536 resolution, compatible with OV5640 camera sensor, integrating additional digital microphone.
+
+🌱 Great Memory for more Possibilities
+
+      Offer 8MB PSRAM and 8MB FLASH, supporting SD card slot for external 32GB FAT memory.
+
+🌱 Outstanding RF performance
+
+      Support 2.4GHz Wi-Fi and BLE dual wireless communication, support 100m+ remote communication when connected with U.FL antenna.
+
+🌱 Perfect for Production
+
+      Breadboard-friendly & SMD design, no components on the back.
+
+Product Description:
+
+Seeed Studio XIAO ESP32S3 Sense is built around a highly-integrated, Xtensa processor ESP32-S3R8 SoC, which supports 2.4GHz WiFi and low-power Bluetooth® BLE 5.0 dual-mode for multiple wireless applications. It has lithium battery charge management capability.
+
+As the advanced version of Seeed Studio XIAO ESP32S3, this board comes with a plug-in OV3660 camera sensor for 
+displaying full 1600*1200 resolution. The base of it is even compatible with OV5640 for supporting up to 2592*1944 resolution. 
+The digital microphone is also carried with the board for voice sensing and audio recognition. SenseCraft AI provides various 
+pre-trained Artificial Intelligence (AI) models and no-code deployment to XIAO ESP32S3 Sense.
+
+// *****************************************************************************************//
