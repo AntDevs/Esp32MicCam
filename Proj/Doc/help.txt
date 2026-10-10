@@ -1,1 +1,8 @@
 https://github.com/AntDevs/Esp32MicCam
+
+// Чтобы узнать, к какому порту подключена плата XIAO ESP32-S3 Sense в Linux Mint
+dmesg | grep -E "ttyACM|ttyUSB"
+ls -l /dev/ttyACM* /dev/ttyUSB*
+sudo ls -l /dev/ttyACM* /dev/ttyUSB*
+
+/dev/ttyACM0

@@ -1,8 +1,9 @@
 #include "DoorAudio.h"
+#include "esp_http_server.h" // <--- ЭТОТ ИМПОРТ РЕШАЕТ ОШИБКУ КОМПИЛЯЦИИ
 
 DoorAudio doorAudio;
 
-// Простейший логгер, соответствующий стандартам проекта Intelligence Door
+// Логгер, соответствующий стандартам проекта Intelligence Door
 void DoorAudio::logInfo(const char* msg) {
     Serial.printf("[INFO] DoorAudio | %s\n", msg);
 }
@@ -16,7 +17,7 @@ void DoorAudio::initI2SMic() {
     
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-        .sample_rate = 16000, // Требование Whisper-small
+        .sample_rate = 16000, 
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
@@ -48,7 +49,7 @@ void DoorAudio::initI2SSpeaker() {
 
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = 24000, // Частота Silero TTS
+        .sample_rate = 24000, 
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
@@ -82,55 +83,58 @@ void DoorAudio::begin() {
     Serial.println("[EXIT] DoorAudio::begin | return: initialized");
 }
 
-void DoorAudio::recordAndSendToSTT(const char* serverUrl, int durationSec) {
-    Serial.printf("[ENTER] recordAndSendToSTT | params: serverUrl=%s, durationSec=%d\n", serverUrl, durationSec);
+// REST API эндпоинт для прослушивания звука с микрофона с защитой от Watchdog Reset
+void DoorAudio::handleGetMicAudio(WebServer& server) {
+    Serial.println("[ENTER] handleGetMicAudio | params: WebServer");
 
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[EXIT ERROR] recordAndSendToSTT | error: WiFi not connected");
-        return;
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "*");
+
+    int durationSec = 3;
+    if (server.hasArg("duration")) {
+        durationSec = server.arg("duration").toInt();
+        if (durationSec <= 0 || durationSec > 10) durationSec = 3;
     }
 
-    HTTPClient http;
-    http.begin(serverUrl);
-    http.addHeader("Content-Type", "application/octet-stream"); // Отправляем сырые байты
-
-    int bytesToRead = 16000 * 2 * durationSec; // 16kHz * 16-bit(2 bytes) * seconds
+    int sampleRate = 16000;
+    int bytesToRead = sampleRate * 2 * durationSec;
     uint8_t* audioBuffer = (uint8_t*)malloc(bytesToRead);
-    
+
     if (!audioBuffer) {
-        Serial.println("[EXIT ERROR] recordAndSendToSTT | error: Failed to allocate memory");
+        server.send(500, "text/plain", "Memory allocation failed");
+        Serial.println("[EXIT ERROR] handleGetMicAudio | error: Out of memory");
         return;
     }
 
     size_t bytesRead = 0;
-    logInfo("Начало записи...");
+    logInfo("Запись аудио с микрофона по REST запросу...");
     
-    // Чтение данных с I2S микрофона
-    esp_err_t err = i2s_read(I2S_MIC_PORT, audioBuffer, bytesToRead, &bytesRead, portMAX_DELAY);
-    if (err != ESP_OK) {
-        Serial.printf("[EXIT ERROR] recordAndSendToSTT | error: i2s_read failed %d\n", err);
+    TickType_t timeoutTicks = pdMS_TO_TICKS((durationSec * 1000) + 500);
+    esp_err_t err = i2s_read(I2S_MIC_PORT, audioBuffer, bytesToRead, &bytesRead, timeoutTicks);
+    
+    if (err != ESP_OK || bytesRead == 0) {
         free(audioBuffer);
+        server.send(500, "text/plain", "I2S read timeout or failed");
+        Serial.printf("[EXIT ERROR] handleGetMicAudio | error: i2s_read failed with code %d, read bytes: %u\n", err, bytesRead);
         return;
     }
 
-    logInfo("Запись завершена, отправка на STT...");
-
-    int httpResponseCode = http.POST(audioBuffer, bytesRead);
-
-    if (httpResponseCode > 0) {
-        String response = http.getString();
-        Serial.printf("[EXIT] recordAndSendToSTT | return: HTTP %d, %s\n", httpResponseCode, response.c_str());
-    } else {
-        Serial.printf("[EXIT ERROR] recordAndSendToSTT | error: HTTP POST failed, code: %d\n", httpResponseCode);
-    }
+    server.sendHeader("Content-Type", "application/octet-stream");
+    server.sendHeader("Content-Disposition", "inline; filename=mic_recording.pcm");
+    server.setContentLength(bytesRead);
+    server.send(200, "application/octet-stream", "");
+    server.client().write(audioBuffer, bytesRead);
 
     free(audioBuffer);
-    http.end();
+    Serial.println("[EXIT] handleGetMicAudio | return: Audio stream sent successfully");
 }
 
-// Статический метод-обработчик для WebServer (эндпоинт /play)
+// Статический метод-обработчик для воспроизведения TTS
 void DoorAudio::handlePlayTTS(WebServer& server) {
     Serial.println("[ENTER] handlePlayTTS | params: WebServer");
+
+    server.sendHeader("Access-Control-Allow-Origin", "*");
 
     if (!server.hasArg("plain")) {
         server.send(400, "text/plain", "Bad Request: No audio body");
@@ -142,7 +146,6 @@ void DoorAudio::handlePlayTTS(WebServer& server) {
     const uint8_t* payload = (const uint8_t*)audioData.c_str();
     size_t payloadLength = audioData.length();
 
-    // Пропускаем WAV-заголовок (первые 44 байта) для воспроизведения сырого PCM
     int headerOffset = 44; 
     if (payloadLength <= headerOffset) {
          server.send(400, "text/plain", "Bad Request: Payload too short");

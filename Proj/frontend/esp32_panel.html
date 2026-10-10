@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-S3 Sense mDNS Control Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-6 font-sans">
+
+    <div class="max-w-4xl mx-auto bg-slate-800 rounded-xl p-6 shadow-xl border border-slate-700">
+        <h1 class="text-2xl font-bold mb-6 flex items-center gap-3">
+            <i class="fa-solid fa-network-wired text-indigo-400"></i> Панель управления ESP32 по mDNS
+        </h1>
+
+        <!-- Блок настройки mDNS хоста -->
+        <div class="mb-6 bg-slate-900 p-4 rounded-lg border border-slate-700 flex gap-4 items-center">
+            <label for="espHost" class="text-sm font-semibold">mDNS Хост:</label>
+            <!-- По умолчанию подставляем ваше имя устройства с суффиксом .local -->
+            <input type="text" id="espHost" value="esp32-door-cam.local" class="bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm flex-1 font-mono text-emerald-400">
+            <button onclick="applyHost()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-sm rounded font-medium transition">Применить</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Секция Видео (Камера) -->
+            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 flex flex-col items-center">
+                <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-video text-emerald-400"></i> Видеопоток (порт 81)
+                </h2>
+                <div class="w-full aspect-video bg-black rounded overflow-hidden flex items-center justify-center border border-slate-800 relative">
+                    <img id="streamImg" src="" alt="Camera Stream" class="w-full h-full object-cover hidden">
+                    <span id="streamPlaceholder" class="text-slate-500 text-sm">Поток выключен</span>
+                </div>
+                <div class="flex gap-2 mt-4 w-full">
+                    <button onclick="startVideo()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-sm font-medium rounded transition">Запустить</button>
+                    <button onclick="stopVideo()" class="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-sm font-medium rounded transition">Остановить</button>
+                </div>
+            </div>
+
+            <!-- Секция Аудио (Микрофон) -->
+            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 flex flex-col justify-between">
+                <div>
+                    <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
+                        <i class="fa-solid fa-microphone text-sky-400"></i> Запрос звука с микрофона
+                    </h2>
+                    <p class="text-xs text-slate-400 mb-4">Запрос пойдет через mDNS на эндпоинт <code class="text-sky-300">/mic</code>:</p>
+                    <button onclick="listenMic()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-sm font-medium rounded transition mb-4">
+                        <i class="fa-solid fa-ear-listen mr-2"></i> Записать и прослушать (3 сек)
+                    </button>
+                    <audio id="micAudioPlayer" controls class="w-full hidden"></audio>
+                </div>
+
+                <div class="mt-4 pt-4 border-t border-slate-800">
+                    <span id="audioStatus" class="text-xs text-slate-400">Статус: Готов</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Функция автоматического определения: если открыто с самого устройства, берем текущий хост, 
+        // иначе берем значение из инпута
+        window.onload = function() {
+            if (window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+                document.getElementById('espHost').value = window.location.hostname;
+            }
+        };
+
+        function getHost() {
+            let host = document.getElementById('espHost').value.trim();
+            // Убираем http:// если пользователь случайно ввел
+            host = host.replace(/^https?:\/\//, '');
+            // Убираем слэши в конце
+            host = host.replace(/\/\$/, '');
+            return host;
+        }
+
+        function applyHost() {
+            const host = getHost();
+            console.log("[INFO] Установлен новый mDNS хост:", host);
+            alert("Хост изменен на: " + host);
+        }
+
+        function startVideo() {
+            const host = getHost();
+            const img = document.getElementById('streamImg');
+            const placeholder = document.getElementById('streamPlaceholder');
+            
+            // Формируем ссылку на видеопоток через mDNS (порт 81)
+            img.src = `http://${host}:81/stream`;
+            img.classList.remove('hidden');
+            placeholder.classList.add('hidden');
+        }
+
+        function stopVideo() {
+            const img = document.getElementById('streamImg');
+            const placeholder = document.getElementById('streamPlaceholder');
+            img.src = "";
+            img.classList.add('hidden');
+            placeholder.classList.remove('hidden');
+        }
+
+        async function listenMic() {
+            const host = getHost();
+            const status = document.getElementById('audioStatus');
+            const player = document.getElementById('micAudioPlayer');
+            
+            status.innerText = "Запрос микрофона по mDNS...";
+            status.style.color = "#38bdf8";
+
+            try {
+                // Запрос к эндпоинту /mic через mDNS
+                const response = await fetch(`http://${host}/mic?duration=3`);
+                if (!response.ok) throw new Error("Не удалось получить аудиопоток с устройства");
+
+                const blob = await response.blob();
+                player.src = URL.createObjectURL(blob);
+                player.classList.remove('hidden');
+                player.play();
+
+                status.innerText = "Воспроизведение получено успешно!";
+                status.style.color = "#4ade80";
+            } catch (err) {
+                status.innerText = "Ошибка: " + err.message;
+                status.style.color = "#f43f5e";
+            }
+        }
+    </script>
+</body>
+</html>
