@@ -21,9 +21,11 @@
 class DoorAudio {
 public:
     void begin();
-    void recordAndSendToSTT(const char* serverUrl, int durationSec);
     static void handlePlayTTS(WebServer& server);
-    static void handleGetMicAudio(WebServer& server); // Новый REST API для захвата звука с микрофона
+    static void handleStartMic(WebServer& server); // Старт непрерывной записи
+    static void handleStopMic(WebServer& server);  // Остановка записи
+
+    static volatile bool isRecording; // Флаг активности записи
 
 private:
     void initI2SMic();

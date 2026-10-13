@@ -17,7 +17,6 @@
         <!-- Блок настройки mDNS хоста -->
         <div class="mb-6 bg-slate-900 p-4 rounded-lg border border-slate-700 flex gap-4 items-center">
             <label for="espHost" class="text-sm font-semibold">mDNS Хост:</label>
-            <!-- По умолчанию подставляем ваше имя устройства с суффиксом .local -->
             <input type="text" id="espHost" value="esp32-door-cam.local" class="bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm flex-1 font-mono text-emerald-400">
             <button onclick="applyHost()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-sm rounded font-medium transition">Применить</button>
         </div>
@@ -33,8 +32,8 @@
                     <span id="streamPlaceholder" class="text-slate-500 text-sm">Поток выключен</span>
                 </div>
                 <div class="flex gap-2 mt-4 w-full">
-                    <button onclick="startVideo()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-sm font-medium rounded transition">Запустить</button>
-                    <button onclick="stopVideo()" class="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-sm font-medium rounded transition">Остановить</button>
+                    <button onclick="startVideo()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-sm font-medium transition">Запустить</button>
+                    <button onclick="stopVideo()" class="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-sm font-medium transition">Остановить</button>
                 </div>
             </div>
 
@@ -42,13 +41,20 @@
             <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 flex flex-col justify-between">
                 <div>
                     <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
-                        <i class="fa-solid fa-microphone text-sky-400"></i> Запрос звука с микрофона
+                        <i class="fa-solid fa-microphone text-sky-400"></i> Потоковый микрофон
                     </h2>
-                    <p class="text-xs text-slate-400 mb-4">Запрос пойдет через mDNS на эндпоинт <code class="text-sky-300">/mic</code>:</p>
-                    <button onclick="listenMic()" class="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-sm font-medium rounded transition mb-4">
-                        <i class="fa-solid fa-ear-listen mr-2"></i> Записать и прослушать (3 сек)
-                    </button>
-                    <audio id="micAudioPlayer" controls class="w-full hidden"></audio>
+                    <p class="text-xs text-slate-400 mb-4">Управление через эндпоинты <code class="text-sky-300">/mic/start</code> и <code class="text-sky-300">/mic/stop</code>:</p>
+                    
+                    <div class="flex gap-2 mb-4">
+                        <button onclick="startMicStream()" id="startMicBtn" class="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-sm font-medium rounded transition">
+                            <i class="fa-solid fa-circle-dot mr-1 text-rose-400"></i> Начать запись
+                        </button>
+                        <button onclick="stopMicStream()" id="stopMicBtn" disabled class="flex-1 py-2.5 bg-slate-700 text-slate-400 text-sm font-medium rounded transition cursor-not-allowed">
+                            <i class="fa-solid fa-stop mr-1"></i> Остановить
+                        </button>
+                    </div>
+
+                    <audio id="micAudioPlayer" controls class="w-full hidden mb-2"></audio>
                 </div>
 
                 <div class="mt-4 pt-4 border-t border-slate-800">
@@ -59,8 +65,6 @@
     </div>
 
     <script>
-        // Функция автоматического определения: если открыто с самого устройства, берем текущий хост, 
-        // иначе берем значение из инпута
         window.onload = function() {
             if (window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
                 document.getElementById('espHost').value = window.location.hostname;
@@ -69,9 +73,7 @@
 
         function getHost() {
             let host = document.getElementById('espHost').value.trim();
-            // Убираем http:// если пользователь случайно ввел
             host = host.replace(/^https?:\/\//, '');
-            // Убираем слэши в конце
             host = host.replace(/\/\$/, '');
             return host;
         }
@@ -86,8 +88,6 @@
             const host = getHost();
             const img = document.getElementById('streamImg');
             const placeholder = document.getElementById('streamPlaceholder');
-            
-            // Формируем ссылку на видеопоток через mDNS (порт 81)
             img.src = `http://${host}:81/stream`;
             img.classList.remove('hidden');
             placeholder.classList.add('hidden');
@@ -101,30 +101,138 @@
             placeholder.classList.remove('hidden');
         }
 
-        async function listenMic() {
+        let micAbortController = null;
+        let recordedChunks = [];
+
+        async function startMicStream() {
             const host = getHost();
             const status = document.getElementById('audioStatus');
             const player = document.getElementById('micAudioPlayer');
-            
-            status.innerText = "Запрос микрофона по mDNS...";
+            const startBtn = document.getElementById('startMicBtn');
+            const stopBtn = document.getElementById('stopMicBtn');
+
+            recordedChunks = [];
+            player.classList.add('hidden');
+            micAbortController = new AbortController();
+
+            status.innerText = "Запись потока с микрофона...";
             status.style.color = "#38bdf8";
 
+            startBtn.disabled = true;
+            startBtn.classList.remove('bg-sky-600', 'hover:bg-sky-500');
+            startBtn.classList.add('bg-slate-700', 'text-slate-500', 'cursor-not-allowed');
+
+            stopBtn.disabled = false;
+            stopBtn.classList.remove('bg-slate-700', 'text-slate-400', 'cursor-not-allowed');
+            stopBtn.classList.add('bg-rose-600', 'hover:bg-rose-500');
+
             try {
-                // Запрос к эндпоинту /mic через mDNS
-                const response = await fetch(`http://${host}/mic?duration=3`);
-                if (!response.ok) throw new Error("Не удалось получить аудиопоток с устройства");
+                const response = await fetch(`http://${host}/mic/start`, {
+                    signal: micAbortController.signal
+                });
+                if (!response.ok) throw new Error("Не удалось запустить потоковую запись");
 
-                const blob = await response.blob();
-                player.src = URL.createObjectURL(blob);
-                player.classList.remove('hidden');
-                player.play();
-
-                status.innerText = "Воспроизведение получено успешно!";
-                status.style.color = "#4ade80";
+                const reader = response.body.getReader();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) {
+                        recordedChunks.push(value);
+                    }
+                }
             } catch (err) {
-                status.innerText = "Ошибка: " + err.message;
-                status.style.color = "#f43f5e";
+                if (err.name !== 'AbortError') {
+                    console.error("[ERROR] Mic stream error:", err);
+                }
+            } finally {
+                processRecordedAudio();
             }
+        }
+
+        async function stopMicStream() {
+            const host = getHost();
+            const status = document.getElementById('audioStatus');
+            
+            status.innerText = "Остановка записи...";
+            status.style.color = "#f59e0b";
+
+            try {
+                await fetch(`http://${host}/mic/stop`);
+            } catch (err) {
+                console.error("[ERROR] Failed to send stop signal:", err);
+            }
+
+            if (micAbortController) {
+                micAbortController.abort();
+            }
+        }
+
+        function processRecordedAudio() {
+            const status = document.getElementById('audioStatus');
+            const player = document.getElementById('micAudioPlayer');
+            const startBtn = document.getElementById('startMicBtn');
+            const stopBtn = document.getElementById('stopMicBtn');
+
+            startBtn.disabled = false;
+            startBtn.classList.remove('bg-slate-700', 'text-slate-500', 'cursor-not-allowed');
+            startBtn.classList.add('bg-sky-600', 'hover:bg-sky-500');
+
+            stopBtn.disabled = true;
+            stopBtn.classList.remove('bg-rose-600', 'hover:bg-rose-500');
+            stopBtn.classList.add('bg-slate-700', 'text-slate-400', 'cursor-not-allowed');
+
+            if (recordedChunks.length === 0) {
+                status.innerText = "Запись пуста или остановлена.";
+                status.style.color = "#f43f5e";
+                return;
+            }
+
+            const totalLength = recordedChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            const pcmData = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of recordedChunks) {
+                pcmData.set(chunk, offset);
+                offset += chunk.length;
+            }
+
+            const sampleRate = 16000;
+            const channels = 1;
+            const bitsPerSample = 16;
+            const dataSize = pcmData.length;
+            const chunkSize = 36 + dataSize;
+            const byteRate = sampleRate * channels * (bitsPerSample / 8);
+            const blockAlign = channels * (bitsPerSample / 8);
+
+            const wavHeader = new ArrayBuffer(44);
+            const view = new DataView(wavHeader);
+            
+            function writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, chunkSize, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, channels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+            writeString(view, 36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            const wavBlob = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
+            player.src = URL.createObjectURL(wavBlob);
+            player.classList.remove('hidden');
+            player.play();
+
+            status.innerText = `Запись завершена (${(dataSize / (sampleRate * 2)).toFixed(1)} сек). Воспроизведение...`;
+            status.style.color = "#4ade80";
         }
     </script>
 </body>

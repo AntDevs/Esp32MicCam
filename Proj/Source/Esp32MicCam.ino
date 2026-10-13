@@ -186,12 +186,18 @@ void setup() {
     // 4. Инициализация аудио и REST API (Работают всегда)
     doorAudio.begin();
 
+// Регистрация эндпоинтов на порту 80
     server.on("/play", HTTP_POST, []() {
         DoorAudio::handlePlayTTS(server);
     });
 
-    server.on("/mic", HTTP_GET, []() {
-        DoorAudio::handleGetMicAudio(server);
+    // Новые эндпоинты для непрерывной потоковой записи микрофона
+    server.on("/mic/start", HTTP_GET, []() {
+        DoorAudio::handleStartMic(server);
+    });
+
+    server.on("/mic/stop", HTTP_GET, []() {
+        DoorAudio::handleStopMic(server);
     });
 
     server.begin();
