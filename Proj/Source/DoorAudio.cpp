@@ -4,6 +4,41 @@
 DoorAudio doorAudio;
 volatile bool DoorAudio::isRecording = false;
 
+WiFiClient micClient;
+TaskHandle_t micTaskHandle = NULL;
+
+static File fsUploadFile; // Глобальный объект для сохранения файлов на диск
+
+void audioStreamTask(void *pvParameters) {
+    const size_t bufferSize = 1024;
+    uint8_t readBuffer[bufferSize];
+    size_t bytesRead = 0;
+    unsigned long startTime = millis();
+    unsigned long maxDurationMs = 10000;
+
+    while (DoorAudio::isRecording && micClient.connected() && (millis() - startTime < maxDurationMs)) {
+        esp_err_t err = i2s_read(I2S_NUM_0, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
+        
+        if (err == ESP_OK && bytesRead > 0) {
+            char chunkHeader[16];
+            int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", bytesRead);
+            micClient.write((uint8_t*)chunkHeader, headerLen);
+            micClient.write(readBuffer, bytesRead);
+            micClient.write((uint8_t*)"\r\n", 2);
+            micClient.flush();
+        }
+        vTaskDelay(pdMS_TO_TICKS(2)); 
+    }
+
+    if (micClient.connected()) {
+        micClient.write((uint8_t*)"0\r\n\r\n", 5);
+        micClient.flush();
+        micClient.stop();
+    }
+    DoorAudio::isRecording = false;
+    vTaskDelete(NULL);
+}
+
 void DoorAudio::logInfo(const char* msg) {
     Serial.printf("[INFO] DoorAudio | %s\n", msg);
 }
@@ -28,10 +63,10 @@ void DoorAudio::initI2SMic() {
     };
 
     i2s_pin_config_t pin_config = {
-        .bck_io_num = 42,               // PDM CLK
+        .bck_io_num = 42,
         .ws_io_num = I2S_PIN_NO_CHANGE, 
         .data_out_num = I2S_PIN_NO_CHANGE,
-        .data_in_num = 41               // PDM DATA
+        .data_in_num = 41
     };
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
@@ -41,8 +76,6 @@ void DoorAudio::initI2SMic() {
     }
     
     i2s_set_pin(I2S_NUM_0, &pin_config);
-
-    // КРИТИЧЕСКИ ВАЖНО: принудительный запуск тактового генератора PDM шины
     err = i2s_set_clk(I2S_NUM_0, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
     if (err != ESP_OK) {
         Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_set_clk failed with code %d\n", err);
@@ -50,7 +83,7 @@ void DoorAudio::initI2SMic() {
     }
 
     i2s_zero_dma_buffer(I2S_NUM_0);
-    Serial.println("[EXIT] initI2SMic | return: success (PDM mode with explicit clock initialization)");
+    Serial.println("[EXIT] initI2SMic | return: success");
 }
 
 void DoorAudio::initI2SSpeaker() {
@@ -92,91 +125,48 @@ void DoorAudio::begin() {
     Serial.println("[EXIT] DoorAudio::begin | return: initialized");
 }
 
-
-// Эндпоинт запуска непрерывной потоковой записи: /mic/start
 void DoorAudio::handleStartMic(WebServer& server) {
     Serial.println("[ENTER] handleStartMic | params: WebServer");
-
     if (isRecording) {
         server.send(400, "text/plain", "Recording already in progress");
-        Serial.println("[EXIT ERROR] handleStartMic | error: Already recording");
         return;
     }
-
     isRecording = true;
-    logInfo("Старт непрерывной потоковой записи с микрофона...");
+    micClient = server.client(); 
 
-    // Прямая запись HTTP-заголовков для чанк-потока через сокет клиента
-    WiFiClient client = server.client();
-    client.println("HTTP/1.1 200 OK");
-    client.println("Access-Control-Allow-Origin: *");
-    client.println("Content-Type: application/octet-stream");
-    client.println("Transfer-Encoding: chunked");
-    client.println("Connection: keep-alive");
-    client.println();
-    client.flush();
+    micClient.println("HTTP/1.1 200 OK");
+    micClient.println("Access-Control-Allow-Origin: *");
+    micClient.println("Content-Type: application/octet-stream");
+    micClient.println("Transfer-Encoding: chunked");
+    micClient.println("Connection: keep-alive");
+    micClient.println();
+    micClient.flush();
 
-    const size_t bufferSize = 1024;
-    uint8_t readBuffer[bufferSize];
-    size_t bytesRead = 0;
-
-    unsigned long startTime = millis();
-    unsigned long maxDurationMs = 10000; // Защитный лимит: максимум 10 секунд
-
-    // Цикл непрерывной передачи данных до сигнала остановки или таймаута
-    while (isRecording && client.connected() && (millis() - startTime < maxDurationMs)) {
-        esp_err_t err = i2s_read(I2S_MIC_PORT, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
-        if (err == ESP_OK && bytesRead > 0) {
-            // Форматируем чанк по стандартам HTTP Chunked Transfer Encoding: [HEX_SIZE]\r\n[DATA]\r\n
-            char chunkHeader[16];
-            int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", bytesRead);
-            
-            client.write((uint8_t*)chunkHeader, headerLen);
-            client.write(readBuffer, bytesRead);
-            client.write((uint8_t*)"\r\n", 2);
-            client.flush();
-        }
-        yield();
-    }
-
-    // Отправляем финальный нулевой чанк для завершения потока в браузере
-    client.write((uint8_t*)"0\r\n\r\n", 5);
-    client.flush();
-
-    isRecording = false;
-    Serial.println("[EXIT] handleStartMic | return: Recording stopped and stream closed");
+    xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", 8192, NULL, 1, &micTaskHandle, 1);
 }
 
-// Эндпоинт остановки записи: /mic/stop
 void DoorAudio::handleStopMic(WebServer& server) {
     Serial.println("[ENTER] handleStopMic | params: WebServer");
-
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    
     if (!isRecording) {
         server.send(200, "text/plain", "Not recording");
         Serial.println("[EXIT] handleStopMic | return: No active recording");
         return;
     }
-
-    isRecording = false; // Сбрасываем флаг, что прервет цикл в handleStartMic
+    isRecording = false; 
     logInfo("Получен сигнал остановки записи с микрофона.");
-    
     server.send(200, "text/plain", "Recording stopped successfully");
     Serial.println("[EXIT] handleStopMic | return: Stop signal processed");
 }
 
 void DoorAudio::handlePlayTTS(WebServer& server) {
     Serial.println("[ENTER] handlePlayTTS | params: WebServer");
-
     server.sendHeader("Access-Control-Allow-Origin", "*");
-
     if (!server.hasArg("plain")) {
         server.send(400, "text/plain", "Bad Request: No audio body");
         Serial.println("[EXIT ERROR] handlePlayTTS | error: Empty payload");
         return;
     }
-
     String audioData = server.arg("plain");
     const uint8_t* payload = (const uint8_t*)audioData.c_str();
     size_t payloadLength = audioData.length();
@@ -190,13 +180,90 @@ void DoorAudio::handlePlayTTS(WebServer& server) {
 
     size_t bytesWritten = 0;
     esp_err_t err = i2s_write(I2S_SPK_PORT, payload + headerOffset, payloadLength - headerOffset, &bytesWritten, portMAX_DELAY);
-
     if (err != ESP_OK) {
         server.send(500, "text/plain", "Internal Server Error: I2S write failed");
         Serial.printf("[EXIT ERROR] handlePlayTTS | error: i2s_write failed %d\n", err);
         return;
     }
-
     server.send(200, "text/plain", "OK: Audio played");
     Serial.println("[EXIT] handlePlayTTS | return: Playback success");
+}
+
+// =========================================================================
+// 1. ЛОГИКА ПРОИГРЫВАНИЯ АУДИОПОТОКА (НА ЛЕТУ НА I2S)
+// =========================================================================
+void DoorAudio::handlePlayStreamReq(WebServer& server) {
+    Serial.println("[ENTER] handlePlayStreamReq | params: WebServer");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "Stream successfully played on speaker");
+    Serial.println("[EXIT] handlePlayStreamReq | return: OK");
+}
+
+void DoorAudio::handlePlayStreamUpload(WebServer& server) {
+//    Serial.println("[ENTER] handlePlayStreamUpload");
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("[ENTER] handlePlayStreamUpload | params: UPLOAD_FILE_START, filename=%s\n", upload.filename.c_str());
+        i2s_zero_dma_buffer(I2S_SPK_PORT);
+    } 
+    else if (upload.status == UPLOAD_FILE_WRITE) {
+        size_t bytesWritten = 0;
+        uint8_t* data = upload.buf;
+        size_t len = upload.currentSize;
+        
+        // Отсекаем 44-байтный заголовок WAV в самом начале
+        if (upload.totalSize == 0 && len > 44) {
+            data += 44;
+            len -= 44;
+        }
+        
+        esp_err_t err = i2s_write(I2S_SPK_PORT, data, len, &bytesWritten, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[EXIT ERROR] handlePlayStreamUpload | error: i2s_write failed %d\n", err);
+        }
+        // Избегаем блокировки потока WebServer'a
+        delay(1);        
+        Serial.printf("[EXIT] handlePlayStreamUpload | i2s_write: len=%u, bytesWritten=%u \n", len, bytesWritten);
+    } 
+    else if (upload.status == UPLOAD_FILE_END) {
+        Serial.printf("[EXIT] handlePlayStreamUpload | return: UPLOAD_FILE_END, totalSize=%u\n", upload.totalSize);
+    }
+
+//    Serial.println("[EXIT] handlePlayStreamUpload");
+}
+
+// =========================================================================
+// 2. ЛОГИКА СОХРАНЕНИЯ ФАЙЛОВ НА ДИСК (LittleFS)
+// =========================================================================
+void DoorAudio::handleFileUploadReq(WebServer& server) {
+    Serial.println("[ENTER] handleFileUploadReq | params: WebServer");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "File successfully saved to ESP32 Flash");
+    Serial.println("[EXIT] handleFileUploadReq | return: OK");
+}
+
+void DoorAudio::handleFileUploadData(WebServer& server) {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("[ENTER] handleFileUploadData | params: UPLOAD_FILE_START, filename=%s\n", upload.filename.c_str());
+        
+        String path = "/" + upload.filename;
+        fsUploadFile = LittleFS.open(path, "w");
+        if (!fsUploadFile) {
+            Serial.printf("[EXIT ERROR] handleFileUploadData | error: Failed to open %s for writing\n", path.c_str());
+        }
+    } 
+    else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (fsUploadFile) {
+            fsUploadFile.write(upload.buf, upload.currentSize);
+        }
+        // Избегаем Watchdog таймаута при записи длинных файлов
+        delay(1);
+    } 
+    else if (upload.status == UPLOAD_FILE_END) {
+        if (fsUploadFile) {
+            fsUploadFile.close();
+        }
+        Serial.printf("[EXIT] handleFileUploadData | return: UPLOAD_FILE_END, totalSize=%u\n", upload.totalSize);
+    }
 }

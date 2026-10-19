@@ -40,15 +40,17 @@ bool camera_initialized = false;
 
 // Обработчик стрима с камеры (выполняется ТОЛЬКО при запросе /stream)
 static esp_err_t stream_handler(httpd_req_t *req) {
+    Serial.println("[ENTER] stream_handler | params: httpd_req_t *req");
 
     if (!camera_initialized) {
-        httpd_resp_send_500(req); // Заменено с неопределенной функции 503 на существующую 500
+        Serial.println("[EXIT ERROR] stream_handler | error: Camera not initialized");
+        httpd_resp_send_500(req); 
         return ESP_FAIL;
     }
 
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("[ERROR] Camera capture failed on request");
+        Serial.println("[EXIT ERROR] stream_handler | error: Camera capture failed on initial request");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
@@ -60,11 +62,15 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
     esp_err_t res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) return res;
+    if (res != ESP_OK) {
+        Serial.printf("[EXIT ERROR] stream_handler | error: httpd_resp_set_type failed code %d\n", res);
+        return res;
+    }
 
     while (true) {
         fb = esp_camera_fb_get();
         if (!fb) {
+            Serial.println("[TRACE] stream_handler | error: Failed to get frame, breaking stream");
             res = ESP_FAIL;
             break;
         }
@@ -77,14 +83,22 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         if (res == ESP_OK) res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
 
         esp_camera_fb_return(fb);
-        if (res != ESP_OK) break;
+        if (res != ESP_OK) {
+            Serial.println("[TRACE] stream_handler | error: Failed to send chunk, breaking stream");
+            break;
+        }
     }
+    
+    Serial.printf("[EXIT] stream_handler | return: code %d\n", res);
     return res;
 }
 
 void startCameraServer() {
+    Serial.println("[ENTER] startCameraServer | params: none");
+    
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 81;
+    // Без привязки к Ядру 0, чтобы не блокировать Wi-Fi
 
     httpd_uri_t stream_uri = {
         .uri       = "/stream",
@@ -96,7 +110,12 @@ void startCameraServer() {
     if (httpd_start(&camera_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(camera_httpd, &stream_uri);
         Serial.println("[INFO] Camera streaming server started on port 81");
+    } else {
+        Serial.println("[EXIT ERROR] startCameraServer | error: Failed to start httpd");
+        return;
     }
+    
+    Serial.println("[EXIT] startCameraServer | return: void");
 }
 
 
@@ -104,7 +123,37 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\n[ENTER] setup | params: none");
 
-    // 1. Попытка инициализации камеры (изолирована в блок, сбой не блокирует систему)
+    // 1. Инициализация Wi-Fi ПЕРЕД камерой во избежание FB-OVF
+    String current_ssid = camConfig.getWiFiSSID(ssid);
+    String current_pass = camConfig.getWiFiPassword(password);
+
+    Serial.printf("[TRACE] WiFi connecting | target_ssid: %s\n", current_ssid.c_str());
+    WiFi.setHostname(dns_cam);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(current_ssid.c_str(), current_pass.c_str());
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[TRACE] WiFi connected | IP: %s\n", dns_cam);
+    } else {
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP("Door-Setup", "12345678");
+        Serial.printf("[TRACE] AP Mode Started | IP: %s\n", dns_cam);
+    }
+
+    // 2. Запуск mDNS
+    if (MDNS.begin(dns_cam)) {
+        Serial.printf("[TRACE] mDNS started: http://%s.local\n", dns_cam);
+    }
+
+    // 3. Инициализация камеры (теперь после стабильного запуска сети)
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
@@ -150,48 +199,14 @@ void setup() {
         Serial.printf("[EXIT ERROR] Camera init failed (0x%x). Running without camera stream.\n", err);
     }
 
-    // 2. Инициализация Wi-Fi
-    String current_ssid = camConfig.getWiFiSSID(ssid);
-    String current_pass = camConfig.getWiFiPassword(password);
-
-    Serial.printf("[TRACE] WiFi connecting | target_ssid: %s\n", current_ssid.c_str());
-    WiFi.setHostname(dns_cam);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(current_ssid.c_str(), current_pass.c_str());
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-    Serial.println();
-
-    // IPAddress activeIP;
-    if (WiFi.status() == WL_CONNECTED) {
-        // IPAddress activeIP = WiFi.localIP();
-        Serial.printf("[TRACE] WiFi connected | IP: %s\n", dns_cam);
-    } else {
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("Door-Setup", "12345678");
-        // IPAddress activeIP = WiFi.localIP();
-        Serial.printf("[TRACE] AP Mode Started | IP: %s\n", dns_cam);
-    }
-
-    // 3. Запуск mDNS
-    if (MDNS.begin(dns_cam)) {
-        Serial.printf("[TRACE] mDNS started: http://%s.local\n", dns_cam);
-    }
-
-    // 4. Инициализация аудио и REST API (Работают всегда)
+    // 4. Инициализация аудио и REST API 
     doorAudio.begin();
 
-// Регистрация эндпоинтов на порту 80
+    // Регистрация эндпоинтов на порту 80
     server.on("/play", HTTP_POST, []() {
         DoorAudio::handlePlayTTS(server);
     });
 
-    // Новые эндпоинты для непрерывной потоковой записи микрофона
     server.on("/mic/start", HTTP_GET, []() {
         DoorAudio::handleStartMic(server);
     });
@@ -202,7 +217,7 @@ void setup() {
 
     server.begin();
     startCameraServer();
-    // IPAddress activeIP = WiFi.localIP();
+    
     Serial.println("==================================================");
     Serial.printf("[TRACE] Admin Panel: http://%s.local/\n", dns_cam);
     Serial.printf("[TRACE] Streaming:   http://%s.local:81/stream\n", dns_cam);
