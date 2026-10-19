@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <LittleFS.h>
 #include "CamConfig.h"
 #include "DoorAudio.h"
 #include "esp_http_server.h"
@@ -28,17 +29,14 @@
 #define HREF_GPIO_NUM     47
 #define PCLK_GPIO_NUM     13
 
-// Сетевые настройки и mDNS домен
 const char *ssid = "MyHome_555";
 const char *password = "anton123";
 const char *dns_cam = "esp32-door-cam";
 
-// Основной веб-сервер для REST API (порт 80: /mic и /play)
 WebServer server(80);
 httpd_handle_t camera_httpd = NULL;
 bool camera_initialized = false;
 
-// Обработчик стрима с камеры (выполняется ТОЛЬКО при запросе /stream)
 static esp_err_t stream_handler(httpd_req_t *req) {
     Serial.println("[ENTER] stream_handler | params: httpd_req_t *req");
 
@@ -83,6 +81,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         if (res == ESP_OK) res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
 
         esp_camera_fb_return(fb);
+        
+        delay(1); // ПРЕДОТВРАЩЕНИЕ FB-OVF И БЛОКИРОВКИ ЯДРА WI-FI
+        
         if (res != ESP_OK) {
             Serial.println("[TRACE] stream_handler | error: Failed to send chunk, breaking stream");
             break;
@@ -93,67 +94,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return res;
 }
 
-void startCameraServer() {
-    Serial.println("[ENTER] startCameraServer | params: none");
-    
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 81;
-    // Без привязки к Ядру 0, чтобы не блокировать Wi-Fi
-
-    httpd_uri_t stream_uri = {
-        .uri       = "/stream",
-        .method    = HTTP_GET,
-        .handler   = stream_handler,
-        .user_ctx  = NULL
-    };
-
-    if (httpd_start(&camera_httpd, &config) == ESP_OK) {
-        httpd_register_uri_handler(camera_httpd, &stream_uri);
-        Serial.println("[INFO] Camera streaming server started on port 81");
-    } else {
-        Serial.println("[EXIT ERROR] startCameraServer | error: Failed to start httpd");
-        return;
+bool initCamera(){
+    if (camera_initialized) {
+        Serial.println("[ENTER] initCamera yeat");
+        return camera_initialized;
     }
-    
-    Serial.println("[EXIT] startCameraServer | return: void");
-}
+    Serial.println("[ENTER] initCamera");
 
-
-void setup() {
-    Serial.begin(115200);
-    Serial.println("\n[ENTER] setup | params: none");
-
-    // 1. Инициализация Wi-Fi ПЕРЕД камерой во избежание FB-OVF
-    String current_ssid = camConfig.getWiFiSSID(ssid);
-    String current_pass = camConfig.getWiFiPassword(password);
-
-    Serial.printf("[TRACE] WiFi connecting | target_ssid: %s\n", current_ssid.c_str());
-    WiFi.setHostname(dns_cam);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(current_ssid.c_str(), current_pass.c_str());
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-    Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("[TRACE] WiFi connected | IP: %s\n", dns_cam);
-    } else {
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("Door-Setup", "12345678");
-        Serial.printf("[TRACE] AP Mode Started | IP: %s\n", dns_cam);
-    }
-
-    // 2. Запуск mDNS
-    if (MDNS.begin(dns_cam)) {
-        Serial.printf("[TRACE] mDNS started: http://%s.local\n", dns_cam);
-    }
-
-    // 3. Инициализация камеры (теперь после стабильного запуска сети)
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
@@ -199,13 +146,78 @@ void setup() {
         Serial.printf("[EXIT ERROR] Camera init failed (0x%x). Running without camera stream.\n", err);
     }
 
-    // 4. Инициализация аудио и REST API 
-    doorAudio.begin();
+    Serial.println("[EXIT] initCamera");
+    return camera_initialized;
+}
 
-    // Регистрация эндпоинтов на порту 80
-    server.on("/play", HTTP_POST, []() {
-        DoorAudio::handlePlayTTS(server);
-    });
+void startCameraServer() {
+    Serial.println("[ENTER] startCameraServer | params: none");
+    
+    if ( !initCamera() ) {
+        Serial.println("[EXIT] startCameraServer initCamera false");
+        return;
+    }
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 81;
+    config.core_id = 0; // Строго по скиллу: тяжелый процесс камеры на Core 0
+
+    httpd_uri_t stream_uri = {
+        .uri       = "/stream",
+        .method    = HTTP_GET,
+        .handler   = stream_handler,
+        .user_ctx  = NULL
+    };
+
+    if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+        httpd_register_uri_handler(camera_httpd, &stream_uri);
+        Serial.println("[INFO] Camera streaming server started on port 81");
+    } else {
+        Serial.println("[EXIT ERROR] startCameraServer | error: Failed to start httpd");
+        return;
+    }
+    
+    Serial.println("[EXIT] startCameraServer | return: void");
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("\n[ENTER] setup | params: none");
+
+    // Инициализация файловой системы для загрузки файлов
+    if (!LittleFS.begin(true)) {
+        Serial.println("[TRACE] setup | error: LittleFS Mount Failed");
+    }
+
+    String current_ssid = camConfig.getWiFiSSID(ssid);
+    String current_pass = camConfig.getWiFiPassword(password);
+
+    Serial.printf("[TRACE] WiFi connecting | target_ssid: %s\n", current_ssid.c_str());
+    WiFi.setHostname(dns_cam);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(current_ssid.c_str(), current_pass.c_str());
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[TRACE] WiFi connected | IP: %s\n", dns_cam);
+    } else {
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP("Door-Setup", "12345678");
+        Serial.printf("[TRACE] AP Mode Started | IP: %s\n", dns_cam);
+    }
+
+    if (MDNS.begin(dns_cam)) {
+        Serial.printf("[TRACE] mDNS started: http://%s.local\n", dns_cam);
+    }
+
+    doorAudio.begin();
 
     server.on("/mic/start", HTTP_GET, []() {
         DoorAudio::handleStartMic(server);
@@ -213,6 +225,24 @@ void setup() {
 
     server.on("/mic/stop", HTTP_GET, []() {
         DoorAudio::handleStopMic(server);
+    });
+
+    server.on("/play", HTTP_POST, []() {
+        DoorAudio::handlePlayTTS(server);
+    });
+
+    // 1. Эндпоинт прямого потокового воспроизведения на I2S ЦАП
+    server.on("/api/stream_play", HTTP_POST, []() {
+        DoorAudio::handlePlayStreamReq(server);
+    }, []() {
+        DoorAudio::handlePlayStreamUpload(server);
+    });
+
+    // 2. Эндпоинт загрузки файла во внутреннюю память
+    server.on("/api/upload", HTTP_POST, []() {
+        DoorAudio::handleFileUploadReq(server);
+    }, []() {
+        DoorAudio::handleFileUploadData(server);
     });
 
     server.begin();

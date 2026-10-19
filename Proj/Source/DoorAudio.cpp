@@ -10,6 +10,7 @@ TaskHandle_t micTaskHandle = NULL;
 static File fsUploadFile; // Глобальный объект для сохранения файлов на диск
 
 void audioStreamTask(void *pvParameters) {
+    Serial.println("[ENTER] audioStreamTask | params: pvParameters");
     const size_t bufferSize = 1024;
     uint8_t readBuffer[bufferSize];
     size_t bytesRead = 0;
@@ -36,15 +37,20 @@ void audioStreamTask(void *pvParameters) {
         micClient.stop();
     }
     DoorAudio::isRecording = false;
+    Serial.println("[EXIT] audioStreamTask | return: void");
     vTaskDelete(NULL);
 }
 
 void DoorAudio::logInfo(const char* msg) {
+    Serial.printf("[ENTER] logInfo | params: msg=%s\n", msg);
     Serial.printf("[INFO] DoorAudio | %s\n", msg);
+    Serial.println("[EXIT] logInfo | return: void");
 }
 
 void DoorAudio::logError(const char* msg) {
+    Serial.printf("[ENTER] logError | params: msg=%s\n", msg);
     Serial.printf("[ERROR] DoorAudio | %s\n", msg);
+    Serial.println("[EXIT] logError | return: void");
 }
 
 void DoorAudio::initI2SMic() {
@@ -65,7 +71,7 @@ void DoorAudio::initI2SMic() {
     i2s_pin_config_t pin_config = {
         .bck_io_num = 42,
         .ws_io_num = I2S_PIN_NO_CHANGE, 
-        .data_out_num = I2S_PIN_NO_CHANGE,
+        .data_out_num = I2S_PIN_NO_CHANGE, 
         .data_in_num = 41
     };
 
@@ -115,6 +121,26 @@ void DoorAudio::initI2SSpeaker() {
     }
     
     i2s_set_pin(I2S_SPK_PORT, &pin_config);
+
+// =========================================================================
+    // ДИАГНОСТИЧЕСКИЙ СИГНАЛ (БИП) ДЛЯ ПРОВЕРКИ ЦАП
+    // =========================================================================
+    Serial.println("[TRACE] initI2SSpeaker | Генерация тестового сигнала (бип 1000 Гц)");
+    size_t bytes_written;
+    int16_t sample;
+
+    // Очищаем DMA буфер, чтобы убрать шум после остановки генерации
+    i2s_zero_dma_buffer(I2S_SPK_PORT);
+
+    // При 24000 Гц тон 1000 Гц = 24 сэмпла на период (12 вверх, 12 вниз).
+    // Проигрываем 250 мс -> 24000 * 0.25 = 6000 сэмплов.
+    for(int i = 0; i < 6000; i++) {
+        sample = ((i % 24) < 12) ? 8000 : -8000;
+        i2s_write(I2S_SPK_PORT, &sample, sizeof(sample), &bytes_written, portMAX_DELAY);
+    }
+    
+    // =========================================================================
+
     Serial.println("[EXIT] initI2SSpeaker | return: success");
 }
 
@@ -129,6 +155,7 @@ void DoorAudio::handleStartMic(WebServer& server) {
     Serial.println("[ENTER] handleStartMic | params: WebServer");
     if (isRecording) {
         server.send(400, "text/plain", "Recording already in progress");
+        Serial.println("[EXIT ERROR] handleStartMic | error: Recording in progress");
         return;
     }
     isRecording = true;
@@ -143,6 +170,7 @@ void DoorAudio::handleStartMic(WebServer& server) {
     micClient.flush();
 
     xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", 8192, NULL, 1, &micTaskHandle, 1);
+    Serial.println("[EXIT] handleStartMic | return: Task started");
 }
 
 void DoorAudio::handleStopMic(WebServer& server) {
@@ -150,11 +178,11 @@ void DoorAudio::handleStopMic(WebServer& server) {
     server.sendHeader("Access-Control-Allow-Origin", "*");
     if (!isRecording) {
         server.send(200, "text/plain", "Not recording");
-        Serial.println("[EXIT] handleStopMic | return: No active recording");
+        Serial.println("[EXIT ERROR] handleStopMic | error: No active recording");
         return;
     }
     isRecording = false; 
-    logInfo("Получен сигнал остановки записи с микрофона.");
+    Serial.println("[INFO] DoorAudio | Получен сигнал остановки записи с микрофона.");
     server.send(200, "text/plain", "Recording stopped successfully");
     Serial.println("[EXIT] handleStopMic | return: Stop signal processed");
 }
@@ -200,7 +228,6 @@ void DoorAudio::handlePlayStreamReq(WebServer& server) {
 }
 
 void DoorAudio::handlePlayStreamUpload(WebServer& server) {
-//    Serial.println("[ENTER] handlePlayStreamUpload");
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         Serial.printf("[ENTER] handlePlayStreamUpload | params: UPLOAD_FILE_START, filename=%s\n", upload.filename.c_str());
@@ -228,8 +255,6 @@ void DoorAudio::handlePlayStreamUpload(WebServer& server) {
     else if (upload.status == UPLOAD_FILE_END) {
         Serial.printf("[EXIT] handlePlayStreamUpload | return: UPLOAD_FILE_END, totalSize=%u\n", upload.totalSize);
     }
-
-//    Serial.println("[EXIT] handlePlayStreamUpload");
 }
 
 // =========================================================================
@@ -259,6 +284,7 @@ void DoorAudio::handleFileUploadData(WebServer& server) {
         }
         // Избегаем Watchdog таймаута при записи длинных файлов
         delay(1);
+        Serial.printf("[EXIT] handleFileUploadData | write_chunk: len=%u \n", upload.currentSize);
     } 
     else if (upload.status == UPLOAD_FILE_END) {
         if (fsUploadFile) {
