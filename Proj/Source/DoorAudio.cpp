@@ -1,5 +1,6 @@
 #include "DoorAudio.h"
 #include "esp_http_server.h"
+// #include "pcm.h"
 
 DoorAudio doorAudio;
 volatile bool DoorAudio::isRecording = false;
@@ -18,7 +19,7 @@ void audioStreamTask(void *pvParameters) {
     unsigned long maxDurationMs = 10000;
 
     while (DoorAudio::isRecording && micClient.connected() && (millis() - startTime < maxDurationMs)) {
-        esp_err_t err = i2s_read(I2S_NUM_0, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
+        esp_err_t err = i2s_read(I2S_MIC_PORT, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
         
         if (err == ESP_OK && bytesRead > 0) {
             char chunkHeader[16];
@@ -54,7 +55,7 @@ void DoorAudio::logError(const char* msg) {
 }
 
 void DoorAudio::initI2SMic() {
-    Serial.println("[ENTER] initI2SMic | params: none");
+    Serial.printf("[ENTER] initI2SMic | I2S_MIC_PORT: %d \n" , I2S_MIC_PORT);
     
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
@@ -75,27 +76,27 @@ void DoorAudio::initI2SMic() {
         .data_in_num = 41
     };
 
-    esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    esp_err_t err = i2s_driver_install(I2S_MIC_PORT, &i2s_config, 0, NULL);
     if (err != ESP_OK) {
         Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_driver_install failed with code %d\n", err);
         return;
     }
     
-    i2s_set_pin(I2S_NUM_0, &pin_config);
-    err = i2s_set_clk(I2S_NUM_0, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+    i2s_set_pin(I2S_MIC_PORT, &pin_config);
+    err = i2s_set_clk(I2S_MIC_PORT, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
     if (err != ESP_OK) {
         Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_set_clk failed with code %d\n", err);
         return;
     }
 
-    i2s_zero_dma_buffer(I2S_NUM_0);
+    i2s_zero_dma_buffer(I2S_MIC_PORT);
     Serial.println("[EXIT] initI2SMic | return: success");
 }
 
 void DoorAudio::initI2SSpeaker() {
-    Serial.println("[ENTER] initI2SSpeaker | params: none");
+    Serial.printf("[ENTER] initI2SSpeaker | I2S_SPK_PORT: %d \n" , I2S_SPK_PORT);
 
-    i2s_config_t i2s_config = {
+    i2s_config_t i2s_config_old = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate = 24000, 
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
@@ -107,8 +108,23 @@ void DoorAudio::initI2SSpeaker() {
         .use_apll = false
     };
 
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = 16000,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        // Формат изменен на ПРАВЫЙ канал. Работает, если CTRL подключен к 3.3V
+        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+        .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_STAND_I2S),
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 1024,  // Увеличен размер буфера во избежание щелчков
+        .use_apll = false,    // Для 16kHz APLL не обязателен
+        .tx_desc_auto_clear = true,
+        .fixed_mclk = 0
+    };
+ 
     i2s_pin_config_t pin_config = {
-        .bck_io_num = I2S_SPK_BCLK,
+        .bck_io_num = I2S_SPK_BCLK, 
         .ws_io_num = I2S_SPK_LRC,
         .data_out_num = I2S_SPK_DIN,
         .data_in_num = I2S_PIN_NO_CHANGE
@@ -120,23 +136,31 @@ void DoorAudio::initI2SSpeaker() {
         return;
     }
     
-    i2s_set_pin(I2S_SPK_PORT, &pin_config);
+    err = i2s_set_pin(I2S_SPK_PORT, &pin_config);
+    if (err != ESP_OK) {
+        Serial.printf("[EXIT ERROR] initI2SSpeaker | error: i2s_set_pin failed with code %d\n", err);
+        return;
+    }
 
-// =========================================================================
+    // Очищаем DMA буфер, чтобы убрать шум после остановки генерации
+    i2s_zero_dma_buffer(I2S_SPK_PORT);
+
+    // =========================================================================
     // ДИАГНОСТИЧЕСКИЙ СИГНАЛ (БИП) ДЛЯ ПРОВЕРКИ ЦАП
     // =========================================================================
     Serial.println("[TRACE] initI2SSpeaker | Генерация тестового сигнала (бип 1000 Гц)");
     size_t bytes_written;
     int16_t sample;
 
-    // Очищаем DMA буфер, чтобы убрать шум после остановки генерации
-    i2s_zero_dma_buffer(I2S_SPK_PORT);
-
     // При 24000 Гц тон 1000 Гц = 24 сэмпла на период (12 вверх, 12 вниз).
     // Проигрываем 250 мс -> 24000 * 0.25 = 6000 сэмплов.
     for(int i = 0; i < 6000; i++) {
         sample = ((i % 24) < 12) ? 8000 : -8000;
-        i2s_write(I2S_SPK_PORT, &sample, sizeof(sample), &bytes_written, portMAX_DELAY);
+        err = i2s_write(I2S_SPK_PORT, &sample, sizeof(sample), &bytes_written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[ERROR] initI2SSpeaker | error: i2s_write failed with code %d\n", err);
+            break;
+        }
     }
     
     // =========================================================================
@@ -144,10 +168,49 @@ void DoorAudio::initI2SSpeaker() {
     Serial.println("[EXIT] initI2SSpeaker | return: success");
 }
 
+// void DoorAudio::sendSound(){
+//     Serial.printf("[ENTER] DoorAudio | sendSound: %d \n" , I2S_SPK_PORT);
+//     //   CLOGI << "Writing PCM data, size: " << sizeof(_MERRY_CHRISTMAS_PCM) << " bytes";
+//     delay(100);
+
+//     size_t bytes_written = 0;
+//     size_t total_bytes = sizeof(_MERRY_CHRISTMAS_PCM);
+//     size_t bytes_to_write = total_bytes;
+//     const uint8_t* pcm_data = (const uint8_t*)_MERRY_CHRISTMAS_PCM;
+    
+//     while (bytes_to_write > 0) {
+//         size_t chunk_size = (bytes_to_write > 1024) ? 1024 : bytes_to_write;
+//         size_t chunk_written = 0;
+        
+//         esp_err_t err = i2s_write(I2S_SPK_PORT, pcm_data + (total_bytes - bytes_to_write), 
+//                         chunk_size, &chunk_written, pdMS_TO_TICKS(1000));
+        
+//         if (err != ESP_OK) {
+//         //   CLOGE << "i2s_write failed at offset " << (total_bytes - bytes_to_write)             << ": " << err;
+//         break;
+//         }
+        
+//         bytes_written += chunk_written;
+//         bytes_to_write -= chunk_written;
+        
+//         if (chunk_written == 0) {
+//         //   CLOGW << "No bytes written, possible buffer full";
+//         delay(10);
+//         }
+//     }
+    
+//     //   CLOGI << "Total bytes written: " << bytes_written << "/" << total_bytes;
+//     delay(100);
+//     //   CLOGI << "setup OK - Audio should be playing now";
+//     Serial.printf("[EXIT] DoorAudio | sendSound: %d \n" , I2S_SPK_PORT);
+// }
+
+
 void DoorAudio::begin() {
     Serial.println("[ENTER] DoorAudio::begin | params: none");
     initI2SMic();
-    initI2SSpeaker();
+    // initI2SSpeaker();
+//    sendSound();
     Serial.println("[EXIT] DoorAudio::begin | return: initialized");
 }
 

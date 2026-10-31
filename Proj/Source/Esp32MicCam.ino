@@ -4,30 +4,11 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
+#include "driver/ledc.h"
 #include "CamConfig.h"
 #include "DoorAudio.h"
+#include "DoorVideo.h"
 #include "esp_http_server.h"
-
-// =========================================================
-// ПИНЫ КАМЕРЫ ДЛЯ SEEED STUDIO XIAO ESP32S3 SENSE
-// =========================================================
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM     10
-#define SIOD_GPIO_NUM     40
-#define SIOC_GPIO_NUM     39
-
-#define Y9_GPIO_NUM       48
-#define Y8_GPIO_NUM       11
-#define Y7_GPIO_NUM       12
-#define Y6_GPIO_NUM       14
-#define Y5_GPIO_NUM       16
-#define Y4_GPIO_NUM       18
-#define Y3_GPIO_NUM       17
-#define Y2_GPIO_NUM       15
-#define VSYNC_GPIO_NUM    38
-#define HREF_GPIO_NUM     47
-#define PCLK_GPIO_NUM     13
 
 const char *ssid = "MyHome_555";
 const char *password = "anton123";
@@ -94,73 +75,79 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return res;
 }
 
-bool initCamera(){
-    if (camera_initialized) {
-        Serial.println("[ENTER] initCamera yeat");
-        return camera_initialized;
-    }
-    Serial.println("[ENTER] initCamera");
+// bool initCamera(){
+//     if (camera_initialized) {
+//         Serial.println("[ENTER] initCamera yeat");
+//         return camera_initialized;
+//     }
+//     Serial.println("[ENTER] initCamera");
 
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
-    config.pin_d0 = Y2_GPIO_NUM;
-    config.pin_d1 = Y3_GPIO_NUM;
-    config.pin_d2 = Y4_GPIO_NUM;
-    config.pin_d3 = Y5_GPIO_NUM;
-    config.pin_d4 = Y6_GPIO_NUM;
-    config.pin_d5 = Y7_GPIO_NUM;
-    config.pin_d6 = Y8_GPIO_NUM;
-    config.pin_d7 = Y9_GPIO_NUM;
-    config.pin_xclk = XCLK_GPIO_NUM;
-    config.pin_pclk = PCLK_GPIO_NUM;
-    config.pin_vsync = VSYNC_GPIO_NUM;
-    config.pin_href = HREF_GPIO_NUM;
-    config.pin_sccb_sda = SIOD_GPIO_NUM;
-    config.pin_sccb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn = PWDN_GPIO_NUM;
-    config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_JPEG;
-    config.grab_mode = CAMERA_GRAB_LATEST; 
-    config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
+//     camera_config_t config;
+//     config.ledc_channel = LEDC_CHANNEL_0;
+//     config.ledc_timer = LEDC_TIMER_0;
+//     config.pin_d0 = Y2_GPIO_NUM;
+//     config.pin_d1 = Y3_GPIO_NUM;
+//     config.pin_d2 = Y4_GPIO_NUM;
+//     config.pin_d3 = Y5_GPIO_NUM;
+//     config.pin_d4 = Y6_GPIO_NUM;
+//     config.pin_d5 = Y7_GPIO_NUM;
+//     config.pin_d6 = Y8_GPIO_NUM;
+//     config.pin_d7 = Y9_GPIO_NUM;
+//     config.pin_xclk = XCLK_GPIO_NUM;
+//     config.pin_pclk = PCLK_GPIO_NUM;
+//     config.pin_vsync = VSYNC_GPIO_NUM;
+//     config.pin_href = HREF_GPIO_NUM;
+//     config.pin_sccb_sda = SIOD_GPIO_NUM;
+//     config.pin_sccb_scl = SIOC_GPIO_NUM;
+//     config.pin_pwdn = PWDN_GPIO_NUM;
+//     config.pin_reset = RESET_GPIO_NUM;
+//     config.xclk_freq_hz = 20000000;
+//     config.pixel_format = PIXFORMAT_JPEG;
+//     config.grab_mode = CAMERA_GRAB_LATEST; 
+//     config.fb_location = CAMERA_FB_IN_PSRAM;
+//     config.jpeg_quality = 12;
+//     config.fb_count = 1;
 
-    if (psramFound()) {
-        config.frame_size = FRAMESIZE_SVGA;
-        config.jpeg_quality = 10;
-        config.fb_count = 2;
-    } else {
-        config.frame_size = FRAMESIZE_VGA;
-        config.fb_location = CAMERA_FB_IN_DRAM;
-    }
+//     if (psramFound()) {
+//         config.frame_size = FRAMESIZE_SVGA;
+//         config.jpeg_quality = 10;
+//         config.fb_count = 2;
+//     } else {
+//         config.frame_size = FRAMESIZE_VGA;
+//         config.fb_location = CAMERA_FB_IN_DRAM;
+//     }
 
-    esp_err_t err = esp_camera_init(&config);
-    if (err == ESP_OK) {
-        camera_initialized = true;
-        sensor_t *s = esp_camera_sensor_get();
-        camConfig.loadCameraSettings(s);
-        Serial.println("[TRACE] Camera initialized successfully");
-    } else {
-        Serial.printf("[EXIT ERROR] Camera init failed (0x%x). Running without camera stream.\n", err);
-    }
+//     esp_err_t err = esp_camera_init(&config);
+//     if (err == ESP_OK) {
+//         camera_initialized = true;
+//         sensor_t *s = esp_camera_sensor_get();
+//         camConfig.loadCameraSettings(s);
+//         Serial.println("[TRACE] Camera initialized successfully");
+//     } else {
+//         Serial.printf("[EXIT ERROR] Camera init failed (0x%x). Running without camera stream.\n", err);
+//     }
 
-    Serial.println("[EXIT] initCamera");
-    return camera_initialized;
-}
+//     Serial.println("[EXIT] initCamera");
+//     return camera_initialized;
+// }
 
 void startCameraServer() {
     Serial.println("[ENTER] startCameraServer | params: none");
     
-    if ( !initCamera() ) {
+// ЗАЩИТА: Если сервер уже работает, ничего не делаем
+    if (camera_httpd != NULL) {
+        Serial.println("[TRACE] Camera server is already running");
+        return;
+    }
+
+    if ( !doorVideo.initCamera() ) {
         Serial.println("[EXIT] startCameraServer initCamera false");
         return;
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 81;
-    config.core_id = 0; // Строго по скиллу: тяжелый процесс камеры на Core 0
+    config.core_id = 1; // Строго по скиллу: тяжелый процесс камеры на Core 0
 
     httpd_uri_t stream_uri = {
         .uri       = "/stream",
@@ -183,6 +170,14 @@ void startCameraServer() {
 void setup() {
     Serial.begin(115200);
     Serial.println("\n[ENTER] setup | params: none");
+
+// 1. СТРОГО ПЕРЕД WI-FI И FS: Захватываем DMA память
+    doorVideo.initCamera();
+    doorVideo.stop(); // Сразу переводим в сон до вызова /cam/start
+
+// 2. СРАЗУ аппаратно отключаем тактирование (сенсор полностью замирает)
+    // На архитектуре ESP32-S3 для камеры используется низкоскоростной таймер
+    ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0);
 
     // Инициализация файловой системы для загрузки файлов
     if (!LittleFS.begin(true)) {
@@ -217,15 +212,8 @@ void setup() {
         Serial.printf("[TRACE] mDNS started: http://%s.local\n", dns_cam);
     }
 
-    doorAudio.begin();
-
-    server.on("/mic/start", HTTP_GET, []() {
-        DoorAudio::handleStartMic(server);
-    });
-
-    server.on("/mic/stop", HTTP_GET, []() {
-        DoorAudio::handleStopMic(server);
-    });
+//    doorAudio.begin();
+//    doorVideo.begin();
 
     server.on("/play", HTTP_POST, []() {
         DoorAudio::handlePlayTTS(server);
@@ -245,8 +233,28 @@ void setup() {
         DoorAudio::handleFileUploadData(server);
     });
 
+    server.on("/mic/start", HTTP_GET, []() {
+        DoorAudio::handleStartMic(server);
+    });
+
+    server.on("/mic/stop", HTTP_GET, []() {
+        DoorAudio::handleStopMic(server);
+    });
+
+    server.on("/spr/start", HTTP_GET, []() {
+        doorAudio.initI2SSpeaker();
+    });
+
+    server.on("/cam/start", HTTP_GET, []() {
+        doorVideo.start();
+    });
+
+    server.on("/cam/stop", HTTP_GET, []() {
+        doorVideo.stop();
+    });
+
+
     server.begin();
-    startCameraServer();
     
     Serial.println("==================================================");
     Serial.printf("[TRACE] Admin Panel: http://%s.local/\n", dns_cam);
@@ -256,6 +264,6 @@ void setup() {
 }
 
 void loop() {
-    server.handleClient();
+    server.handleClient();     
     delay(2);
 }
