@@ -15,10 +15,10 @@ class DoorVideo {
         void start();
         void stop();
         bool initCamera();
+        bool isInitialized() const { return camera_initialized; }
     private:
         void checkMem();
         bool camera_initialized = false;
-        void startCameraServer();
 };
 
 extern DoorVideo doorVideo;

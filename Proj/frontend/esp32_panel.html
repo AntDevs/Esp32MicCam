@@ -1,195 +1,755 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-S3 Sense mDNS Control Panel</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Door Panel</title>
+<!-- Без внешних CDN: панель должна работать и в AP режиме "Door-Setup" без интернета,
+     и при раздаче прямо с ESP32 (загрузите этот файл через раздел "Файлы", откроется на http://host/) -->
+<style>
+    :root {
+        --bg: #0f172a; --card: #1e293b; --inner: #0b1222; --line: #334155;
+        --text: #e2e8f0; --muted: #94a3b8;
+        --ok: #10b981; --err: #f43f5e; --warn: #f59e0b; --info: #38bdf8; --accent: #818cf8; --spk: #d946ef;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+           font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .wrap { max-width: 1000px; margin: 0 auto; display: grid; gap: 16px; }
+    h1 { font-size: 20px; margin: 0; }
+    h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+    .grid2 { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+    @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row > .grow { flex: 1; min-width: 0; }
+    /* Элементы grid по умолчанию не сжимаются уже содержимого — на телефоне это давало горизонтальный скролл */
+    .wrap > *, .grid2 > *, .settings > * { min-width: 0; }
+    .settings select { width: 100%; }
+    input[type=text].grow { min-width: 140px; }
+    input[type=text], select { background: var(--inner); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 6px 10px; font: inherit; }
+    input[type=text] { font-family: ui-monospace, monospace; color: #6ee7b7; }
+    input[type=range] { accent-color: var(--accent); }
+    input[type=file] { color: var(--muted); max-width: 100%; }
+    button { border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; font-weight: 600; color: #fff;
+             background: #475569; cursor: pointer; transition: filter .15s; }
+    button:hover:not(:disabled) { filter: brightness(1.15); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .b-ok { background: #059669; } .b-err { background: #e11d48; } .b-info { background: #0284c7; }
+    .b-accent { background: #4f46e5; } .b-spk { background: #a21caf; } .b-sm { padding: 4px 10px; font-size: 12px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .mono { font-family: ui-monospace, monospace; }
+    .video { width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; border: 1px solid var(--line);
+             display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+    .video img { width: 100%; height: 100%; object-fit: contain; }
+    .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+    .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--inner); border: 1px solid var(--line); }
+    .badge.on { border-color: var(--ok); color: #6ee7b7; } .badge.off { color: var(--muted); }
+    .badge.bad { border-color: var(--err); color: #fda4af; } .badge.rec { border-color: var(--err); color: #fda4af; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 12px; }
+    .stat { background: var(--inner); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+    .stat b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }
+    .bar { height: 6px; background: var(--inner); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+    .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s; }
+    .meter > i { background: linear-gradient(90deg, var(--ok), var(--warn) 70%, var(--err)); }
+    .settings { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; }
+    td.r, th.r { text-align: right; }
+    #log { background: var(--inner); border: 1px solid var(--line); border-radius: 8px; height: 180px; overflow: auto;
+           padding: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+    .l-ok { color: #6ee7b7; } .l-err { color: #fda4af; } .l-warn { color: #fcd34d; } .l-info { color: var(--muted); }
+    .tests li { margin: 2px 0; } .tests .pass { color: #6ee7b7; } .tests .fail { color: #fda4af; } .tests .run { color: #fcd34d; }
+    audio { width: 100%; margin-top: 8px; }
+    .hidden { display: none !important; }
+</style>
 </head>
-<body class="bg-slate-900 text-slate-100 min-h-screen p-6 font-sans">
+<body>
+<div class="wrap">
 
-    <div class="max-w-4xl mx-auto bg-slate-800 rounded-xl p-6 shadow-xl border border-slate-700">
-        <h1 class="text-2xl font-bold mb-6 flex items-center gap-3">
-            <i class="fa-solid fa-network-wired text-indigo-400"></i> Панель управления ESP32 по mDNS
-        </h1>
-
-        <div class="mb-6 bg-slate-900 p-4 rounded-lg border border-slate-700 flex gap-4 items-center">
-            <label for="espHost" class="text-sm font-semibold">mDNS Хост:</label>
-            <input type="text" id="espHost" value="esp32-door-cam.local" class="bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm flex-1 font-mono text-emerald-400">
-            <button onclick="applyHost()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-sm rounded font-medium transition">Применить</button>
+    <!-- Хост и состояние -->
+    <div class="card">
+        <div class="row" style="justify-content: space-between">
+            <h1>Панель ESP32-S3 Sense</h1>
+            <div class="badges">
+                <span id="bConn" class="badge off">нет связи</span>
+                <span id="bCam" class="badge off">камера</span>
+                <span id="bStream" class="badge off">стрим</span>
+                <span id="bMic" class="badge off">микрофон</span>
+                <span id="bSpk" class="badge off">динамик</span>
+            </div>
         </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <!-- Секция Видео (Камера) -->
-            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 flex flex-col items-center">
-                <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
-                    <i class="fa-solid fa-video text-emerald-400"></i> Видеопоток (порт 81)
-                </h2>
-                <div class="w-full aspect-video bg-black rounded overflow-hidden flex items-center justify-center border border-slate-800 relative">
-                    <img id="streamImg" src="" alt="Camera Stream" class="w-full h-full object-cover hidden">
-                    <span id="streamPlaceholder" class="text-slate-500 text-sm">Поток выключен</span>
-                </div>
-                <div class="flex gap-2 mt-4 w-full">
-                    <button onclick="startVideo()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-sm font-medium transition">Запустить</button>
-                    <button onclick="stopVideo()" class="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-sm font-medium transition">Остановить</button>
-                </div>
-            </div>
-
-            <!-- Секция Аудио (Микрофон) -->
-            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 flex flex-col justify-between">
-                <div>
-                    <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
-                        <i class="fa-solid fa-microphone text-sky-400"></i> Потоковый микрофон
-                    </h2>
-                    
-                    <div class="flex gap-2 mb-4">
-                        <button onclick="startMicStream()" id="startMicBtn" class="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-sm font-medium rounded transition">
-                            <i class="fa-solid fa-circle-dot mr-1 text-rose-400"></i> Начать запись
-                        </button>
-                        <button onclick="stopMicStream()" id="stopMicBtn" disabled class="flex-1 py-2.5 bg-slate-700 text-slate-400 text-sm font-medium rounded transition cursor-not-allowed">
-                            <i class="fa-solid fa-stop mr-1"></i> Остановить
-                        </button>
-                    </div>
-
-                    <audio id="micAudioPlayer" controls class="w-full hidden mb-2"></audio>
-                </div>
-
-                <div class="mt-4 pt-4 border-t border-slate-800">
-                    <span id="audioStatus" class="text-xs text-slate-400">Статус: Готов</span>
-                </div>
-            </div>
-
-            <!-- РАЗДЕЛЕНИЕ: Проигрывание потока на динамик -->
-            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 mt-4 md:col-span-2">
-                <h3 class="text-sm font-semibold mb-2 flex items-center gap-2">
-                    <i class="fa-solid fa-volume-high text-fuchsia-400"></i> Проиграть аудио (стриминг на динамик на лету)
-                </h3>
-                <input type="file" id="audioStreamInput" accept=".wav" class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-fuchsia-600 file:text-white hover:file:bg-fuchsia-500 mb-2 cursor-pointer transition">
-                <button onclick="streamAudioFile()" id="streamAudioBtn" class="w-full py-2.5 bg-slate-700 hover:bg-fuchsia-600 text-slate-200 text-sm font-medium rounded transition">
-                    <i class="fa-solid fa-play mr-1"></i> Транслировать звуковой поток
-                </button>
-            </div> 
-            
-            <!-- РАЗДЕЛЕНИЕ: Сохранение файла на диск -->
-            <div class="bg-slate-900 p-4 rounded-lg border border-slate-700 mt-4 md:col-span-2">
-                <h3 class="text-sm font-semibold mb-2 flex items-center gap-2">
-                    <i class="fa-solid fa-save text-emerald-400"></i> Загрузить файл на диск ESP32 (сохранение)
-                </h3>
-                <input type="file" id="audioUploadInput" accept=".wav" class="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 mb-2 cursor-pointer transition">
-                <button onclick="uploadAudioFile()" id="uploadAudioBtn" class="w-full py-2.5 bg-slate-700 hover:bg-emerald-600 text-slate-200 text-sm font-medium rounded transition">
-                    <i class="fa-solid fa-upload mr-1"></i> Сохранить файл в память устройства
-                </button>
-            </div>            
+        <div class="row" style="margin-top: 12px">
+            <label for="espHost" class="muted">Хост:</label>
+            <input type="text" id="espHost" class="grow" value="esp32-door-cam.local">
+            <button class="b-accent" onclick="refreshStatus(true)">Подключиться</button>
+            <label class="muted"><input type="checkbox" id="autoPoll" checked> автообновление</label>
+        </div>
+        <div class="stats">
+            <div class="stat"><span class="muted">Heap свободно / мин.</span><b id="sHeap">—</b></div>
+            <div class="stat"><span class="muted">DMA своб. / наиб. блок</span><b id="sDma">—</b></div>
+            <div class="stat"><span class="muted">PSRAM свободно</span><b id="sPsram">—</b></div>
+            <div class="stat"><span class="muted">Wi-Fi</span><b id="sWifi">—</b></div>
+            <div class="stat"><span class="muted">Аптайм</span><b id="sUptime">—</b></div>
+            <div class="stat"><span class="muted">LittleFS</span><b id="sFs">—</b></div>
         </div>
     </div>
 
-    <script>
-        window.onload = function() {
-            if (window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
-                document.getElementById('espHost').value = window.location.hostname;
+    <div class="grid2">
+        <!-- Видео -->
+        <div class="card">
+            <h2><span style="color:var(--ok)">●</span> Видео (порт 81)</h2>
+            <div class="video">
+                <img id="streamImg" class="hidden" alt="Видеопоток">
+                <span id="streamPlaceholder" class="muted">Поток выключен</span>
+            </div>
+            <div class="row" style="margin-top: 10px">
+                <button class="b-ok grow" id="btnVideoStart" onclick="startVideo()">Запустить</button>
+                <button class="b-err grow" id="btnVideoStop" onclick="stopVideo()">Остановить</button>
+                <button class="b-info" onclick="takeSnapshot()">Снимок</button>
+            </div>
+            <a id="snapLink" class="muted hidden" download="capture.jpg" style="display:block;margin-top:6px">Скачать последний снимок</a>
+
+            <div class="settings">
+                <label class="muted" for="cFramesize">Разрешение</label>
+                <select id="cFramesize" onchange="camSet('framesize', this.value)">
+                    <option value="5">QVGA 320×240</option>
+                    <option value="6">CIF 400×296</option>
+                    <option value="7">HVGA 480×320</option>
+                    <option value="8">VGA 640×480</option>
+                    <option value="9">SVGA 800×600</option>
+                    <option value="10">XGA 1024×768</option>
+                </select><span></span>
+                <label class="muted" for="cQuality">Качество JPEG</label>
+                <input type="range" id="cQuality" min="4" max="63" oninput="qv.textContent=this.value" onchange="camSet('quality', this.value)">
+                <span id="qv" class="mono muted">—</span>
+                <label class="muted" for="cBrightness">Яркость</label>
+                <input type="range" id="cBrightness" min="-2" max="2" oninput="bv.textContent=this.value" onchange="camSet('brightness', this.value)">
+                <span id="bv" class="mono muted">—</span>
+                <label class="muted" for="cContrast">Контраст</label>
+                <input type="range" id="cContrast" min="-2" max="2" oninput="cv.textContent=this.value" onchange="camSet('contrast', this.value)">
+                <span id="cv" class="mono muted">—</span>
+                <span class="muted">Отражение</span>
+                <span class="row">
+                    <label><input type="checkbox" id="cVflip" onchange="camSet('vflip', this.checked ? 1 : 0)"> верт.</label>
+                    <label><input type="checkbox" id="cHmirror" onchange="camSet('hmirror', this.checked ? 1 : 0)"> гориз.</label>
+                </span><span></span>
+            </div>
+            <p class="muted">Меньше качество (число) — больше кадр и нагрузка. Настройки сохраняются в NVS.</p>
+        </div>
+
+        <!-- Микрофон -->
+        <div class="card">
+            <h2><span style="color:var(--info)">●</span> Микрофон (PDM, 16 кГц)</h2>
+            <div class="row">
+                <label class="muted" for="micSec">Длительность</label>
+                <select id="micSec">
+                    <option value="5">5 с</option>
+                    <option value="10" selected>10 с</option>
+                    <option value="30">30 с</option>
+                    <option value="60">60 с</option>
+                </select>
+                <label class="muted"><input type="checkbox" id="micLive" checked> слушать вживую</label>
+            </div>
+            <div class="row" style="margin-top: 10px">
+                <button class="b-info grow" id="btnMicStart" onclick="startMicStream()">● Начать запись</button>
+                <button class="grow" id="btnMicStop" onclick="stopMicStream()" disabled>■ Остановить</button>
+            </div>
+            <div style="margin-top: 12px">
+                <div class="row" style="justify-content: space-between">
+                    <span class="muted">Уровень</span>
+                    <span id="micInfo" class="mono muted">0.0 с · 0 КБ</span>
+                </div>
+                <div class="bar meter"><i id="micLevel"></i></div>
+            </div>
+            <div class="row" style="margin-top: 10px">
+                <label class="muted" for="micGain">Усиление</label>
+                <input type="range" id="micGain" class="grow" min="1" max="16" step="1" value="4" oninput="mgv.textContent='×'+this.value">
+                <span id="mgv" class="mono muted">×4</span>
+            </div>
+            <audio id="micAudioPlayer" controls class="hidden"></audio>
+            <a id="micDownload" class="muted hidden" download="mic.wav">Скачать запись WAV</a>
+            <p class="muted">PDM микрофон тихий — усиление применяется к прослушиванию и к WAV.</p>
+        </div>
+    </div>
+
+    <!-- Динамик -->
+    <div class="card">
+        <h2><span style="color:var(--spk)">●</span> Динамик (I2S1, 16 кГц моно)</h2>
+        <div class="row">
+            <button class="b-spk" onclick="playBeep()">Тестовый бип</button>
+            <input type="file" id="audioStreamInput" accept="audio/*,.wav" class="grow">
+            <button class="b-spk" id="btnStreamAudio" onclick="streamAudioFile()">Транслировать</button>
+        </div>
+        <div class="row" style="margin-top: 10px">
+            <label class="muted" for="spkVolume">Громкость</label>
+            <input type="range" id="spkVolume" class="grow" min="0.1" max="2" step="0.1" value="1" oninput="svv.textContent=Math.round(this.value*100)+'%'">
+            <span id="svv" class="mono muted">100%</span>
+            <label class="muted"><input type="checkbox" id="spkConvert" checked> конвертировать в 16 кГц моно</label>
+        </div>
+        <div class="bar"><i id="spkProgress"></i></div>
+        <p class="muted">Прошивка играет сырой PCM 16 бит / 16 кГц / моно. Конвертация в браузере принимает любой формат (MP3, OGG, WAV 44.1 кГц стерео...).</p>
+    </div>
+
+    <!-- Файлы -->
+    <div class="card">
+        <h2><span style="color:var(--ok)">●</span> Файлы LittleFS</h2>
+        <div class="row">
+            <input type="file" id="audioUploadInput" class="grow">
+            <button class="b-ok" id="btnUpload" onclick="uploadFile()">Загрузить</button>
+            <button class="b-sm" onclick="refreshFiles()">Обновить список</button>
+        </div>
+        <div class="bar"><i id="uploadProgress"></i></div>
+        <p class="muted">Аудио конвертируется в WAV 16 кГц моно (с учетом громкости выше). Остальные файлы, например
+            <span class="mono">esp32_panel.html</span>, загружаются как есть; этот файл станет главной страницей устройства.</p>
+        <table>
+            <thead><tr><th>Имя</th><th class="r">Размер</th><th class="r">Действия</th></tr></thead>
+            <tbody id="fileList"><tr><td colspan="3" class="muted">Нажмите «Обновить список»</td></tr></tbody>
+        </table>
+    </div>
+
+    <!-- Самопроверка -->
+    <div class="card">
+        <div class="row" style="justify-content: space-between">
+            <h2 style="margin:0"><span style="color:var(--warn)">●</span> Полная самопроверка</h2>
+            <button class="b-accent" id="btnSelfTest" onclick="runSelfTest()">Запустить проверку</button>
+        </div>
+        <p class="muted">Статус → бип → камера + снимок + стоп → запись 3 с с анализом сигнала → список файлов → сравнение памяти до и после.</p>
+        <ol id="testList" class="tests mono"></ol>
+    </div>
+
+    <!-- Журнал -->
+    <div class="card">
+        <div class="row" style="justify-content: space-between; margin-bottom: 8px">
+            <h2 style="margin:0">Журнал</h2>
+            <button class="b-sm" onclick="logEl.textContent=''">Очистить</button>
+        </div>
+        <div id="log"></div>
+    </div>
+</div>
+
+<script>
+const SAMPLE_RATE = 16000;
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+
+// ---------------------------------------------------------------- утилиты
+function log(msg, level = 'info') {
+    const line = document.createElement('div');
+    line.className = 'l-' + level;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function getHost() {
+    return $('espHost').value.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+}
+const api = path => `http://${getHost()}${path}`;
+let CAM_PORT = 81; // порт httpd камеры в прошивке
+const camApi = path => `http://${getHost().replace(/:\d+$/, '')}:${CAM_PORT}${path}`;
+
+const kb = n => (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' КБ';
+const fmtUptime = s => `${Math.floor(s / 3600)}ч ${Math.floor(s / 60) % 60}м ${s % 60}с`;
+
+// WebServer на порту 80 однопоточный: пока идет долгая операция (проигрывание, загрузка),
+// опрос статуса только мешает, поэтому считаем активные операции
+let busy = 0;
+async function withBusy(fn) {
+    busy++;
+    try { return await fn(); } finally { busy--; }
+}
+
+async function request(url, { method = 'GET', body, timeout = 8000, quiet = false } = {}) {
+    const t0 = performance.now();
+    try {
+        const res = await fetch(url, { method, body, signal: AbortSignal.timeout(timeout) });
+        const text = await res.text();
+        const ms = Math.round(performance.now() - t0);
+        if (!quiet || !res.ok) log(`${method} ${url} → ${res.status} (${ms} мс) ${text.slice(0, 120)}`, res.ok ? 'ok' : 'err');
+        return { ok: res.ok, status: res.status, text };
+    } catch (e) {
+        const reason = e.name === 'TimeoutError' ? 'таймаут' : 'ошибка сети';
+        if (!quiet) log(`${method} ${url} → ${reason}`, 'err');
+        return { ok: false, status: 0, text: reason };
+    }
+}
+
+// XHR вместо fetch ради прогресса отправки
+function postWithProgress(url, formData, bar) {
+    return new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        xhr.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%'; };
+        xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, text: xhr.responseText });
+        xhr.onerror = () => resolve({ ok: false, status: 0, text: 'ошибка сети' });
+        xhr.send(formData);
+    });
+}
+
+function setBadge(id, state, label) {
+    const el = $(id);
+    el.className = 'badge ' + state;
+    if (label) el.textContent = label;
+}
+
+// ---------------------------------------------------------------- статус
+let lastStatus = null;
+
+async function fetchStatus() {
+    const r = await request(api('/api/status'), { timeout: 4000, quiet: true });
+    if (!r.ok) return null;
+    try { return JSON.parse(r.text); } catch { return null; }
+}
+
+async function refreshStatus(manual = false) {
+    if (busy && !manual) return;
+    const host = getHost();
+    const st = await fetchStatus();
+    if (host !== getHost()) return null; // хост сменили, пока ждали ответ — результат устарел
+    if (!st) {
+        setBadge('bConn', 'bad', 'нет связи');
+        if (manual) log('Устройство не отвечает на /api/status', 'err');
+        return null;
+    }
+    lastStatus = st;
+    setBadge('bConn', 'on', 'на связи');
+    setBadge('bCam', st.cam.init ? 'on' : 'bad', 'камера');
+    setBadge('bStream', st.cam.streaming ? 'on' : 'off', 'стрим');
+    setBadge('bMic', !st.mic.ready ? 'bad' : st.mic.recording ? 'rec' : 'on', st.mic.recording ? 'запись' : 'микрофон');
+    setBadge('bSpk', st.spk.ready ? 'on' : 'bad', 'динамик');
+
+    $('sHeap').textContent = `${kb(st.heap_free)} / ${kb(st.heap_min)}`;
+    $('sDma').textContent = `${kb(st.dma_free)} / ${kb(st.dma_largest)}`;
+    $('sDma').style.color = st.dma_largest < 8192 ? 'var(--err)' : '';
+    $('sPsram').textContent = st.psram_total ? kb(st.psram_free) : 'нет PSRAM!';
+    $('sPsram').style.color = st.psram_total ? '' : 'var(--err)';
+    $('sWifi').textContent = st.wifi_mode === 'AP' ? `AP ${st.ip}` : `${st.rssi} dBm · ${st.ip}`;
+    $('sUptime').textContent = fmtUptime(st.uptime_s);
+    $('sFs').textContent = `${kb(st.fs.used)} / ${kb(st.fs.total)}`;
+
+    // Не перетираем ползунок, который пользователь сейчас двигает
+    if (st.cam.framesize !== undefined && document.activeElement?.closest('.settings') == null) {
+        $('cFramesize').value = st.cam.framesize;
+        $('cQuality').value = st.cam.quality; qv.textContent = st.cam.quality;
+        $('cBrightness').value = st.cam.brightness; bv.textContent = st.cam.brightness;
+        $('cContrast').value = st.cam.contrast; cv.textContent = st.cam.contrast;
+        $('cVflip').checked = !!st.cam.vflip;
+        $('cHmirror').checked = !!st.cam.hmirror;
+    }
+    return st;
+}
+
+setInterval(() => {
+    if ($('autoPoll').checked && document.visibilityState === 'visible') refreshStatus();
+}, 3000);
+
+// ---------------------------------------------------------------- видео
+async function startVideo() {
+    const r = await withBusy(() => request(api('/cam/start')));
+    if (!r.ok) return false;
+    const img = $('streamImg');
+    img.onerror = () => {
+        if (!img.classList.contains('hidden')) log('Видеопоток прерван', 'warn');
+    };
+    img.src = camApi('/stream') + '?t=' + Date.now();
+    img.classList.remove('hidden');
+    $('streamPlaceholder').classList.add('hidden');
+    refreshStatus();
+    return true;
+}
+
+async function stopVideo() {
+    // Сначала закрываем соединение со стримом, потом гасим сервер
+    const img = $('streamImg');
+    img.classList.add('hidden');
+    img.removeAttribute('src');
+    $('streamPlaceholder').classList.remove('hidden');
+    const r = await withBusy(() => request(api('/cam/stop')));
+    refreshStatus();
+    return r.ok;
+}
+
+async function takeSnapshot() {
+    try {
+        const t0 = performance.now();
+        const res = await fetch(camApi('/capture') + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = $('snapLink');
+        link.href = url;
+        link.classList.remove('hidden');
+        if ($('streamImg').classList.contains('hidden')) {
+            $('streamImg').src = url;
+            $('streamImg').classList.remove('hidden');
+            $('streamPlaceholder').classList.add('hidden');
+        }
+        log(`Снимок ${kb(blob.size)} за ${Math.round(performance.now() - t0)} мс`, 'ok');
+        return blob;
+    } catch (e) {
+        log('Снимок не получен: ' + e.message + ' (камера запущена?)', 'err');
+        return null;
+    }
+}
+
+async function camSet(key, val) {
+    await request(api(`/cam/set?var=${encodeURIComponent(key)}&val=${encodeURIComponent(val)}`));
+}
+
+// ---------------------------------------------------------------- микрофон
+let micAbort = null;
+let micChunks = [];
+let micBytes = 0;
+let micCtx = null;
+let micNextTime = 0;
+let micStartedAt = 0;
+
+function int16ToFloat(int16, gain) {
+    const out = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) out[i] = Math.max(-1, Math.min(1, int16[i] / 32768 * gain));
+    return out;
+}
+
+function playLive(int16) {
+    if (!micCtx) return;
+    const buf = micCtx.createBuffer(1, int16.length, SAMPLE_RATE);
+    buf.copyToChannel(int16ToFloat(int16, +$('micGain').value), 0);
+    const src = micCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(micCtx.destination);
+    micNextTime = Math.max(micNextTime, micCtx.currentTime + 0.08);
+    src.start(micNextTime);
+    micNextTime += buf.duration;
+}
+
+function rms(int16) {
+    let sum = 0;
+    for (let i = 0; i < int16.length; i++) sum += int16[i] * int16[i];
+    return Math.sqrt(sum / (int16.length || 1));
+}
+
+// Записывает поток с /mic/start. Возвращает Int16Array с сэмплами
+async function recordMic(seconds, live) {
+    micChunks = [];
+    micBytes = 0;
+    micAbort = new AbortController();
+    micStartedAt = performance.now();
+    if (live) {
+        micCtx = new AudioContext();
+        micNextTime = 0;
+    }
+    $('btnMicStart').disabled = true;
+    $('btnMicStop').disabled = false;
+    $('btnMicStop').className = 'b-err grow';
+    log(`Запись ${seconds} с...`);
+
+    let carry = null; // нечетный байт, разрезанный между чанками
+    try {
+        const res = await fetch(api(`/mic/start?sec=${seconds}`), { signal: micAbort.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+        const reader = res.body.getReader();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            let bytes = value;
+            if (carry) {
+                bytes = new Uint8Array(value.length + 1);
+                bytes[0] = carry; bytes.set(value, 1);
+                carry = null;
             }
-        };
-
-        function getHost() {
-            let host = document.getElementById('espHost').value.trim();
-            host = host.replace(/^https?:\/\//, '');
-            host = host.replace(/\/\$/, '');
-            return host;
+            if (bytes.length & 1) { carry = bytes[bytes.length - 1]; bytes = bytes.subarray(0, bytes.length - 1); }
+            if (!bytes.length) continue;
+            const samples = new Int16Array(bytes.slice().buffer);
+            micChunks.push(samples);
+            micBytes += bytes.length;
+            const level = Math.min(100, rms(samples) * +$('micGain').value / 32768 * 300);
+            $('micLevel').style.width = level + '%';
+            $('micInfo').textContent = `${((performance.now() - micStartedAt) / 1000).toFixed(1)} с · ${kb(micBytes)}`;
+            if (live) playLive(samples);
         }
+    } catch (e) {
+        if (e.name !== 'AbortError') log('Ошибка записи: ' + e.message, 'err');
+    } finally {
+        $('btnMicStart').disabled = false;
+        $('btnMicStop').disabled = true;
+        $('btnMicStop').className = 'grow';
+        $('micLevel').style.width = '0';
+        micAbort = null;
+        if (micCtx) { const ctx = micCtx; micCtx = null; setTimeout(() => ctx.close(), 1500); }
+    }
 
-        function applyHost() {
-            const host = getHost();
-            alert("Хост изменен на: " + host);
-        }
+    const total = micChunks.reduce((n, c) => n + c.length, 0);
+    const all = new Int16Array(total);
+    let off = 0;
+    for (const c of micChunks) { all.set(c, off); off += c.length; }
+    log(`Запись завершена: ${(total / SAMPLE_RATE).toFixed(2)} с, ${kb(total * 2)}`, total ? 'ok' : 'err');
+    return all;
+}
 
-        function startVideo() {
-            const host = getHost();
-            const img = document.getElementById('streamImg');
-            const placeholder = document.getElementById('streamPlaceholder');
-            img.src = `http://${host}:81/stream`;
-            img.classList.remove('hidden');
-            placeholder.classList.add('hidden');
-        }
+async function startMicStream() {
+    const samples = await recordMic(+$('micSec').value, $('micLive').checked);
+    if (!samples.length) return;
+    const gain = +$('micGain').value;
+    const boosted = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) boosted[i] = Math.max(-32768, Math.min(32767, samples[i] * gain));
+    const url = URL.createObjectURL(encodeWav(boosted, SAMPLE_RATE));
+    const player = $('micAudioPlayer');
+    player.src = url;
+    player.classList.remove('hidden');
+    $('micDownload').href = url;
+    $('micDownload').classList.remove('hidden');
+}
 
-        function stopVideo() {
-            const img = document.getElementById('streamImg');
-            const placeholder = document.getElementById('streamPlaceholder');
-            img.src = "";
-            img.classList.add('hidden');
-            placeholder.classList.remove('hidden');
-        }
+async function stopMicStream() {
+    // Штатно: прошивка сама допишет последний чанк и закроет соединение
+    await request(api('/mic/stop'));
+    setTimeout(() => micAbort?.abort(), 1500);
+}
 
-        let micAbortController = null;
-        let recordedChunks = [];
+// ---------------------------------------------------------------- WAV и конвертация
+function encodeWav(int16, rate) {
+    const buf = new ArrayBuffer(44 + int16.length * 2);
+    const v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + int16.length * 2, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, int16.length * 2, true);
+    new Int16Array(buf, 44).set(int16);
+    return new Blob([buf], { type: 'audio/wav' });
+}
 
-        async function startMicStream() { /* Логика прежняя */ }
-        async function stopMicStream() { /* Логика прежняя */ }
-        function processRecordedAudio() { /* Логика прежняя */ }
+// Любой аудиофайл → WAV PCM 16 бит / 16 кГц / моно с канонным 44-байтным заголовком,
+// который прошивка отрезает в /api/stream_play
+async function convertToEspWav(file, volume) {
+    const ctx = new AudioContext();
+    let decoded;
+    try { decoded = await ctx.decodeAudioData(await file.arrayBuffer()); }
+    finally { ctx.close(); }
+    const length = Math.ceil(decoded.duration * SAMPLE_RATE);
+    const off = new OfflineAudioContext(1, length, SAMPLE_RATE);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    const gain = off.createGain();
+    gain.gain.value = volume;
+    src.connect(gain).connect(off.destination);
+    src.start();
+    const rendered = (await off.startRendering()).getChannelData(0);
+    const int16 = new Int16Array(rendered.length);
+    for (let i = 0; i < rendered.length; i++) int16[i] = Math.max(-32768, Math.min(32767, Math.round(rendered[i] * 32767)));
+    log(`Конвертировано: ${decoded.sampleRate} Гц ${decoded.numberOfChannels}к → 16000 Гц моно, ${decoded.duration.toFixed(1)} с`);
+    return encodeWav(int16, SAMPLE_RATE);
+}
 
-        // ЭНДПОИНТ 1: ПОТОКОВОЕ ПРОИГРЫВАНИЕ
-        async function streamAudioFile() {
-            const fileInput = document.getElementById('audioStreamInput');
-            const file = fileInput.files[0];
-            const status = document.getElementById('audioStatus');
-            const btn = document.getElementById('streamAudioBtn');
+const isAudio = file => file.type.startsWith('audio/') || /\.(wav|mp3|ogg|m4a|aac|flac|opus|webm)$/i.test(file.name);
 
-            if (!file) {
-                status.innerText = "Ошибка: Сначала выберите WAV файл."; return;
+// ---------------------------------------------------------------- динамик
+async function playBeep() {
+    return withBusy(() => request(api('/spr/start')));
+}
+
+async function streamAudioFile() {
+    const file = $('audioStreamInput').files[0];
+    if (!file) { log('Сначала выберите аудиофайл', 'warn'); return; }
+    const btn = $('btnStreamAudio');
+    btn.disabled = true;
+    try {
+        await withBusy(async () => {
+            let blob = file;
+            if ($('spkConvert').checked) blob = await convertToEspWav(file, +$('spkVolume').value);
+            const fd = new FormData();
+            fd.append('audioFile', blob, 'stream.wav');
+            log(`Трансляция ${kb(blob.size)} на динамик...`);
+            const r = await postWithProgress(api('/api/stream_play'), fd, $('spkProgress'));
+            log(`POST /api/stream_play → ${r.status} ${r.text}`, r.ok ? 'ok' : 'err');
+        });
+    } catch (e) {
+        log('Не удалось подготовить файл: ' + e.message, 'err');
+    } finally {
+        btn.disabled = false;
+        setTimeout(() => $('spkProgress').style.width = '0', 800);
+    }
+}
+
+// ---------------------------------------------------------------- файлы
+async function uploadFile() {
+    const file = $('audioUploadInput').files[0];
+    if (!file) { log('Сначала выберите файл', 'warn'); return; }
+    const btn = $('btnUpload');
+    btn.disabled = true;
+    try {
+        await withBusy(async () => {
+            let blob = file, name = file.name;
+            if (isAudio(file)) {
+                blob = await convertToEspWav(file, +$('spkVolume').value);
+                name = file.name.replace(/\.[^.]+$/, '') + '.wav';
             }
+            const fd = new FormData();
+            fd.append('file', blob, name);
+            log(`Загрузка ${name} (${kb(blob.size)})...`);
+            const r = await postWithProgress(api('/api/upload'), fd, $('uploadProgress'));
+            log(`POST /api/upload → ${r.status} ${r.text}`, r.ok ? 'ok' : 'err');
+        });
+        await refreshFiles();
+    } catch (e) {
+        log('Не удалось подготовить файл: ' + e.message, 'err');
+    } finally {
+        btn.disabled = false;
+        setTimeout(() => $('uploadProgress').style.width = '0', 800);
+    }
+}
 
-            const host = getHost();
-            status.innerText = "Трансляция аудио на динамик ESP32...";
-            btn.disabled = true;
+async function refreshFiles() {
+    const r = await request(api('/api/files'), { quiet: true });
+    const tbody = $('fileList');
+    if (!r.ok) { tbody.innerHTML = '<tr><td colspan="3" class="muted">Не удалось получить список</td></tr>'; return null; }
+    const data = JSON.parse(r.text);
+    tbody.innerHTML = '';
+    if (!data.files.length) tbody.innerHTML = '<tr><td colspan="3" class="muted">Пусто</td></tr>';
+    for (const f of data.files) {
+        const tr = document.createElement('tr');
+        const name = document.createElement('td');
+        name.className = 'mono';
+        name.textContent = f.name;
+        const size = document.createElement('td');
+        size.className = 'r mono';
+        size.textContent = kb(f.size);
+        const actions = document.createElement('td');
+        actions.className = 'r';
+        if (/\.wav$/i.test(f.name)) actions.append(mkBtn('▶', 'b-spk', () => playStoredFile(f.name)), ' ');
+        actions.append(mkBtn('Удалить', 'b-err', () => deleteFile(f.name)));
+        tr.append(name, size, actions);
+        tbody.appendChild(tr);
+    }
+    $('sFs').textContent = `${kb(data.used)} / ${kb(data.total)}`;
+    return data;
+}
 
-            const formData = new FormData();
-            formData.append("audioFile", file);
+function mkBtn(text, cls, onClick) {
+    const b = document.createElement('button');
+    b.className = 'b-sm ' + cls;
+    b.textContent = text;
+    b.onclick = onClick;
+    return b;
+}
 
-            try {
-                const response = await fetch(`http://${host}/api/stream_play`, { method: 'POST', body: formData });
-                if (response.ok) {
-                    status.innerText = "Успешно: поток завершен!";
-                } else {
-                    status.innerText = "Ошибка: " + await response.text();
-                }
-            } catch (err) {
-                status.innerText = "Ошибка сети.";
-            } finally {
-                btn.disabled = false;
-            }
+async function playStoredFile(name) {
+    await withBusy(() => request(api('/api/play_file?name=' + encodeURIComponent(name)), { timeout: 120000 }));
+}
+
+async function deleteFile(name) {
+    if (!confirm(`Удалить ${name}?`)) return;
+    await request(api('/api/delete?name=' + encodeURIComponent(name)));
+    refreshFiles();
+}
+
+// ---------------------------------------------------------------- самопроверка
+async function runSelfTest() {
+    const list = $('testList');
+    list.innerHTML = '';
+    const btn = $('btnSelfTest');
+    btn.disabled = true;
+    let passed = 0, failed = 0;
+
+    async function step(title, fn) {
+        const li = document.createElement('li');
+        li.className = 'run';
+        li.textContent = '… ' + title;
+        list.appendChild(li);
+        try {
+            const detail = await fn();
+            li.className = 'pass';
+            li.textContent = '✓ ' + title + (detail ? ' — ' + detail : '');
+            passed++;
+        } catch (e) {
+            li.className = 'fail';
+            li.textContent = '✗ ' + title + ' — ' + e.message;
+            failed++;
         }
+    }
+    const must = (cond, msg) => { if (!cond) throw new Error(msg); };
 
-        // ЭНДПОИНТ 2: ЗАГРУЗКА ФАЙЛА
-        async function uploadAudioFile() {
-            const fileInput = document.getElementById('audioUploadInput');
-            const file = fileInput.files[0];
-            const status = document.getElementById('audioStatus');
-            const btn = document.getElementById('uploadAudioBtn');
+    log('=== Самопроверка ===', 'warn');
+    let before = null;
+    try {
+        await step('Связь и статус', async () => {
+            before = await refreshStatus(true);
+            must(before, 'нет ответа /api/status');
+            must(before.psram_total > 0, 'PSRAM не найдена (Tools → PSRAM: OPI PSRAM)');
+            return `heap ${kb(before.heap_free)}, DMA блок ${kb(before.dma_largest)}`;
+        });
+        if (!before) return;
 
-            if (!file) {
-                status.innerText = "Ошибка: Сначала выберите WAV файл."; return;
-            }
+        await step('Драйверы инициализированы', async () => {
+            const bad = [];
+            if (!before.cam.init) bad.push('камера');
+            if (!before.mic.ready) bad.push('микрофон');
+            if (!before.spk.ready) bad.push('динамик');
+            must(!bad.length, 'не готовы: ' + bad.join(', '));
+            return 'камера, микрофон, динамик';
+        });
 
-            const host = getHost();
-            status.innerText = "Загрузка файла в память ESP32...";
-            btn.disabled = true;
+        await step('Динамик: бип', async () => {
+            const r = await playBeep();
+            must(r.ok, r.text);
+            return 'слышен ли сигнал — проверьте на слух';
+        });
 
-            const formData = new FormData();
-            formData.append("audioFile", file);
+        await step('Камера: старт сервера', async () => {
+            must(await startVideo(), '/cam/start не удался');
+            await new Promise(r => setTimeout(r, 1500));
+            return 'порт 81 открыт';
+        });
 
-            try {
-                const response = await fetch(`http://${host}/api/upload`, { method: 'POST', body: formData });
-                if (response.ok) {
-                    status.innerText = "Успешно: файл сохранен в память!";
-                } else {
-                    status.innerText = "Ошибка сохранения: " + await response.text();
-                }
-            } catch (err) {
-                status.innerText = "Ошибка сети при загрузке.";
-            } finally {
-                btn.disabled = false;
-            }
-        }
-    </script>
+        await step('Камера: снимок', async () => {
+            const blob = await takeSnapshot();
+            must(blob && blob.size > 1000, 'пустой или нет кадра');
+            return kb(blob.size);
+        });
+
+        await step('Микрофон одновременно с видео: 3 с', async () => {
+            const s = await recordMic(3, false);
+            must(s.length > SAMPLE_RATE * 2, `мало данных: ${s.length} сэмплов`);
+            const level = rms(s);
+            must(level > 2, 'тишина (нули) — проверьте пины PDM: CLK=42 через WS, DATA=41');
+            return `${(s.length / SAMPLE_RATE).toFixed(1)} с, RMS ${level.toFixed(0)}`;
+        });
+
+        await step('Камера: остановка', async () => {
+            must(await stopVideo(), '/cam/stop не ответил (зависание httpd_stop?)');
+            return 'порт 81 закрыт';
+        });
+
+        await step('LittleFS: список файлов', async () => {
+            const d = await refreshFiles();
+            must(d, 'нет ответа /api/files');
+            return `${d.files.length} файл(ов), занято ${kb(d.used)} из ${kb(d.total)}`;
+        });
+
+        await step('Утечки памяти', async () => {
+            await new Promise(r => setTimeout(r, 1000));
+            const after = await refreshStatus(true);
+            must(after, 'нет ответа /api/status');
+            const dHeap = before.heap_free - after.heap_free;
+            const dDma = before.dma_free - after.dma_free;
+            must(dHeap < 16384, `heap уменьшился на ${kb(dHeap)}`);
+            return `Δheap ${kb(dHeap)}, ΔDMA ${kb(dDma)}`;
+        });
+    } finally {
+        log(`=== Итог: ${passed} пройдено, ${failed} с ошибками ===`, failed ? 'err' : 'ok');
+        btn.disabled = false;
+    }
+}
+
+// ---------------------------------------------------------------- старт
+window.addEventListener('load', () => {
+    const h = location.hostname;
+    if (h && h !== 'localhost' && h !== '127.0.0.1') $('espHost').value = location.host;
+    refreshStatus(true);
+});
+</script>
 </body>
 </html>

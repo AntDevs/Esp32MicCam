@@ -47,6 +47,19 @@ void CamConfig::saveCameraSetting(const char* key, int value) {
     }
 }
 
+bool CamConfig::applyCameraSetting(sensor_t *s, const char* key, int value) {
+    Serial.printf("CamConfig applyCameraSetting %s=%d\n", key, value);
+    if (!s) return false;
+    for (int i = 0; i < SETTINGS_COUNT; i++) {
+        if (strcmp(SETTINGS[i].key, key) == 0) {
+            if (SETTINGS[i].apply_func(s, value) != 0) return false;
+            saveCameraSetting(key, value);
+            return true;
+        }
+    }
+    return false;
+}
+
 void CamConfig::saveWiFiCredentials(String ssid, String password) {
     prefs.begin("wifi", false);
     prefs.putString("ssid", ssid);

@@ -35,6 +35,8 @@ public:
     // Работа с настройками изображения
     void loadCameraSettings(sensor_t *s);
     void saveCameraSetting(const char* key, int value);
+    // Применяет настройку к сенсору и сохраняет в NVS. false - неизвестный ключ или сенсор отказал
+    bool applyCameraSetting(sensor_t *s, const char* key, int value);
     
     // Работа с учетными данными Wi-Fi
     void saveWiFiCredentials(String ssid, String password);

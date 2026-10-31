@@ -7,11 +7,13 @@ DoorVideo doorVideo;
 
 // Делаем переменные из .ino файла видимыми здесь
 extern httpd_handle_t camera_httpd;
+extern volatile bool stream_stop_requested;
 extern void startCameraServer();
 
 void DoorVideo::start() {
     if ( !initCamera() ) {
-        Serial.println("[ENTER] DoorVideo::begin initCamera false");
+        Serial.println("[EXIT ERROR] DoorVideo::start | error: initCamera false");
+        return;
     }
 
 // 1. Подаем тактовый сигнал, пробуждая матрицу
@@ -22,13 +24,16 @@ void DoorVideo::start() {
     camera_fb_t *fb = esp_camera_fb_get();
     if (fb) esp_camera_fb_return(fb);
 
-    startCameraServer();
+    // Явно глобальная функция из .ino (раньше вызывался пустой метод класса)
+    ::startCameraServer();
 }
 
 void DoorVideo::stop() {
     Serial.println("[ENTER] DoorVideo::stop");
 // 1. Освобождаем сетевые ресурсы и сокеты
     if (camera_httpd != NULL) {
+        // Сначала просим stream_handler выйти из цикла, иначе httpd_stop() ждет вечно
+        stream_stop_requested = true;
         httpd_stop(camera_httpd);
         camera_httpd = NULL;
         Serial.println("[TRACE] Streaming server stopped (Port 81 closed)");
@@ -70,14 +75,14 @@ void DoorVideo::checkMem(){
 
 
 bool DoorVideo::initCamera(){
-    checkMem();
     if (camera_initialized) {
         Serial.println("[ENTER] initCamera yeat");
         return camera_initialized;
     }
     Serial.println("[ENTER] initCamera");
+    checkMem();
 
-    camera_config_t config;
+    camera_config_t config = {}; // Обнуляем, чтобы в незаданных полях не было мусора
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
     config.pin_d0 = Y2_GPIO_NUM;
@@ -126,33 +131,3 @@ bool DoorVideo::initCamera(){
     return camera_initialized;
 }
 
-
-void DoorVideo::startCameraServer() {
-    // Serial.println("[ENTER] startCameraServer | params: none");
-    
-    // if ( !initCamera() ) {
-    //     Serial.println("[EXIT] startCameraServer initCamera false");
-    //     return;
-    // }
-
-    // httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    // config.server_port = 81;
-    // config.core_id = 0; // Строго по скиллу: тяжелый процесс камеры на Core 0
-
-    // httpd_uri_t stream_uri = {
-    //     .uri       = "/stream",
-    //     .method    = HTTP_GET,
-    //     .handler   = stream_handler,
-    //     .user_ctx  = NULL
-    // };
-
-    // if (httpd_start(&camera_httpd, &config) == ESP_OK) {
-    //     httpd_register_uri_handler(camera_httpd, &stream_uri);
-    //     Serial.println("[INFO] Camera streaming server started on port 81");
-    // } else {
-    //     Serial.println("[EXIT ERROR] startCameraServer | error: Failed to start httpd");
-    //     return;
-    // }
-    
-    // Serial.println("[EXIT] startCameraServer | return: void");
-}
