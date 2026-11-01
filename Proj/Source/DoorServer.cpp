@@ -134,6 +134,7 @@ static void handleStatus() {
     }
     json += "},\"mic\":{\"ready\":"; json += DoorAudio::micReady ? "true" : "false";
     json += ",\"recording\":";      json += DoorAudio::isRecording ? "true" : "false";
+    json += ",\"saving\":";         json += DoorAudio::isSaving ? "true" : "false";
     json += "},\"spk\":{\"ready\":"; json += DoorAudio::speakerReady ? "true" : "false";
     json += "},\"fs\":{\"total\":";  json += fsTotal;
     json += ",\"used\":";           json += fsUsed;
@@ -227,7 +228,7 @@ void DoorServer::registerRoutes() {
     server.on("/cam/set", HTTP_GET, handleCamSet);
     server.on("/capture", HTTP_GET, handleCapture);
 
-    // Файлы в LittleFS: список, проигрывание на динамик, удаление
+    // Файлы в LittleFS: список, скачивание, проигрывание на динамик, удаление
     server.on("/api/files", HTTP_GET, []() {
         DoorAudio::handleListFiles(server);
     });
@@ -236,6 +237,9 @@ void DoorServer::registerRoutes() {
     });
     server.on("/api/delete", HTTP_GET, []() {
         DoorAudio::handleDeleteFile(server);
+    });
+    server.on("/api/download", HTTP_GET, []() {
+        DoorAudio::handleDownloadFile(server);
     });
 
     // 2. Эндпоинт загрузки файла во внутреннюю память

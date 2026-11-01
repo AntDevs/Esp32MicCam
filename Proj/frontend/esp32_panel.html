@@ -170,8 +170,18 @@
                 <span id="mgv" class="mono muted">×4</span>
             </div>
             <audio id="micAudioPlayer" controls class="hidden"></audio>
-            <a id="micDownload" class="muted hidden" download="mic.wav">Скачать запись WAV</a>
+            <a id="micDownload" class="muted hidden" download="mic-boosted.wav">Скачать запись WAV (с усилением)</a>
             <p class="muted">PDM микрофон тихий — усиление применяется к прослушиванию и к WAV.</p>
+            <div class="row" style="margin-top: 12px; justify-content: space-between">
+                <span class="muted">Файл в памяти ESP: <span class="mono">mic.wav</span></span>
+                <span id="micFileInfo" class="mono muted">—</span>
+            </div>
+            <audio id="micFilePlayer" controls preload="none" class="hidden"></audio>
+            <div class="row" style="margin-top: 6px">
+                <button class="b-spk grow" id="btnMicFileSpk" onclick="playStoredFile(MIC_FILE)" disabled>▶ На динамике ESP</button>
+                <button class="grow" onclick="refreshFiles()">⟳ Обновить</button>
+            </div>
+            <p class="muted">Каждая запись перезаписывает mic.wav: первые 10 с, без усиления.</p>
         </div>
     </div>
 
@@ -318,7 +328,8 @@ async function refreshStatus(manual = false) {
     setBadge('bConn', 'on', 'на связи');
     setBadge('bCam', st.cam.init ? 'on' : 'bad', 'камера');
     setBadge('bStream', st.cam.streaming ? 'on' : 'off', 'стрим');
-    setBadge('bMic', !st.mic.ready ? 'bad' : st.mic.recording ? 'rec' : 'on', st.mic.recording ? 'запись' : 'микрофон');
+    setBadge('bMic', !st.mic.ready ? 'bad' : st.mic.recording || st.mic.saving ? 'rec' : 'on',
+             st.mic.recording ? 'запись' : st.mic.saving ? 'сохранение' : 'микрофон');
     setBadge('bSpk', st.spk.ready ? 'on' : 'bad', 'динамик');
 
     $('sHeap').textContent = `${kb(st.heap_free)} / ${kb(st.heap_min)}`;
@@ -507,6 +518,8 @@ async function recordMic(seconds, live) {
         if (micCtx) { const ctx = micCtx; micCtx = null; setTimeout(() => ctx.close(), 1500); }
     }
 
+    if (micBytes) await waitMicSaved();
+
     const total = micChunks.reduce((n, c) => n + c.length, 0);
     const all = new Int16Array(total);
     let off = 0;
@@ -518,8 +531,26 @@ async function recordMic(seconds, live) {
     return all;
 }
 
+// После конца потока прошивка пишет mic.wav во флеш (10 с ≈ 4 с), до этого новая запись вернет 409
+async function waitMicSaved() {
+    $('micInfo').textContent = 'сохранение mic.wav...';
+    const t0 = performance.now();
+    while (performance.now() - t0 < 20000) {
+        const r = await request(api('/api/status'), { quiet: true, timeout: 5000 });
+        if (r.ok && !JSON.parse(r.text).mic.saving) {
+            $('micInfo').textContent = `mic.wav сохранен за ${((performance.now() - t0) / 1000).toFixed(1)} с`;
+            return true;
+        }
+        await new Promise(res => setTimeout(res, 400));
+    }
+    log('mic.wav не сохранился за 20 с', 'err');
+    return false;
+}
+
 async function startMicStream() {
     const samples = await recordMic(+$('micSec').value, $('micLive').checked);
+    // Прошивка дописывает mic.wav до конца потока, так что файл уже обновлен
+    await refreshFiles();
     if (!samples.length) return;
     const gain = +$('micGain').value;
     const boosted = new Int16Array(samples.length);
@@ -654,7 +685,36 @@ async function refreshFiles() {
         tbody.appendChild(tr);
     }
     $('sFs').textContent = `${kb(data.used)} / ${kb(data.total)}`;
+    showMicFile(data.files.find(f => f.name === MIC_FILE));
     return data;
+}
+
+// Последняя запись микрофона, которую прошивка сохраняет в LittleFS
+const MIC_FILE = 'mic.wav';
+function showMicFile(f) {
+    const player = $('micFilePlayer');
+    $('btnMicFileSpk').disabled = !f;
+    if (!f) {
+        $('micFileInfo').textContent = 'нет файла';
+        player.classList.add('hidden');
+        return;
+    }
+    $('micFileInfo').textContent = `${(Math.max(0, f.size - 44) / 2 / SAMPLE_RATE).toFixed(1)} с · ${kb(f.size)}`;
+    // preload="none": WebServer однопоточный, файл качаем только по нажатию ▶
+    player.src = api(`/api/download?name=${MIC_FILE}&t=${Date.now()}`);
+    player.classList.remove('hidden');
+}
+
+// Скачивает mic.wav и разбирает его как PCM 16 бит моно
+async function fetchMicFile() {
+    const res = await fetch(api(`/api/download?name=${MIC_FILE}&t=${Date.now()}`), { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    const v = new DataView(buf);
+    const tag = o => String.fromCharCode(...new Uint8Array(buf, o, 4));
+    if (buf.byteLength < 44 || tag(0) !== 'RIFF' || tag(8) !== 'WAVE') throw new Error('не WAV');
+    return { rate: v.getUint32(24, true), bits: v.getUint16(34, true), channels: v.getUint16(22, true),
+             samples: new Int16Array(buf.slice(44, 44 + (v.getUint32(40, true) & ~1))) };
 }
 
 function mkBtn(text, cls, onClick) {
@@ -743,8 +803,18 @@ async function runSelfTest() {
             const s = await recordMic(3, false);
             must(s.length > SAMPLE_RATE * 2, `мало данных: ${s.length} сэмплов`);
             const level = rms(s);
-            must(level > 2, 'тишина (нули) — проверьте пины PDM: CLK=42 через WS, DATA=41');
+            must(level > 2, 'тишина (нули) — проверьте пины PDM: CLK=42, DATA=41');
             return `${(s.length / SAMPLE_RATE).toFixed(1)} с, RMS ${level.toFixed(0)}`;
+        });
+
+        await step('Микрофон: файл mic.wav в памяти', async () => {
+            const w = await fetchMicFile();
+            must(w.rate === SAMPLE_RATE && w.bits === 16 && w.channels === 1, `формат ${w.channels}ch ${w.bits}bit ${w.rate}Hz`);
+            must(w.samples.length > SAMPLE_RATE * 2, `мало данных: ${w.samples.length} сэмплов`);
+            const level = rms(w.samples);
+            must(level > 2, 'в файле тишина');
+            await refreshFiles();
+            return `${(w.samples.length / SAMPLE_RATE).toFixed(1)} с, RMS ${level.toFixed(0)}`;
         });
 
         await step('Камера: остановка', async () => {
@@ -756,6 +826,12 @@ async function runSelfTest() {
             const d = await refreshFiles();
             must(d, 'нет ответа /api/files');
             return `${d.files.length} файл(ов), занято ${kb(d.used)} из ${kb(d.total)}`;
+        });
+
+        await step('Динамик: mic.wav', async () => {
+            const r = await withBusy(() => request(api('/api/play_file?name=' + MIC_FILE), { timeout: 30000 }));
+            must(r.ok, r.text);
+            return 'запись с микрофона слышна на динамике?';
         });
 
         await step('Утечки памяти', async () => {
@@ -777,7 +853,7 @@ async function runSelfTest() {
 window.addEventListener('load', () => {
     const h = location.hostname;
     if (h && h !== 'localhost' && h !== '127.0.0.1') $('espHost').value = location.host;
-    refreshStatus(true);
+    refreshStatus(true).then(st => { if (st) refreshFiles(); });
 });
 </script>
 </body>

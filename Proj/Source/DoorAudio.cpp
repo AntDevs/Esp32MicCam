@@ -5,12 +5,16 @@
 
 DoorAudio doorAudio;
 volatile bool DoorAudio::isRecording = false;
+volatile bool DoorAudio::isSaving = false;
 bool DoorAudio::micReady = false;
 bool DoorAudio::speakerReady = false;
 
 WiFiClient micClient;
 TaskHandle_t micTaskHandle = NULL;
 
+// Новый драйвер I2S (legacy driver/i2s.h в core 3.x не отдавал данные PDM микрофона)
+static i2s_chan_handle_t micChan = NULL;
+static i2s_chan_handle_t spkChan = NULL;
 static bool speakerRunning = false;
 
 static File fsUploadFile; // Глобальный объект для сохранения файлов на диск
@@ -20,17 +24,60 @@ static const uint32_t SPK_DRAIN_MS = (AUDIO_DMA_BUF_COUNT * AUDIO_DMA_BUF_LEN * 
 
 static void speakerStart() {
     if (!DoorAudio::speakerReady || speakerRunning) return;
-    i2s_zero_dma_buffer(I2S_SPK_PORT);
-    i2s_start(I2S_SPK_PORT);
+    // auto_clear: DMA буферы обнуляются после отправки, старый хвост не прозвучит
+    i2s_channel_enable(spkChan);
     speakerRunning = true;
+}
+
+static esp_err_t speakerWrite(const void *data, size_t len, size_t *written) {
+    return i2s_channel_write(spkChan, data, len, written, portMAX_DELAY);
 }
 
 // Дожидаемся, пока DMA доиграет хвост, и останавливаем тактирование I2S
 static void speakerStop(bool drain) {
     if (!speakerRunning) return;
     if (drain) delay(SPK_DRAIN_MS);
-    i2s_stop(I2S_SPK_PORT);
+    i2s_channel_disable(spkChan);
     speakerRunning = false;
+}
+
+static void writeWavHeader(File &f, uint32_t dataLen) {
+    uint8_t h[44];
+    auto u32 = [&](int o, uint32_t v) { h[o] = v; h[o + 1] = v >> 8; h[o + 2] = v >> 16; h[o + 3] = v >> 24; };
+    auto u16 = [&](int o, uint16_t v) { h[o] = v; h[o + 1] = v >> 8; };
+    memcpy(h, "RIFF", 4); u32(4, 36 + dataLen); memcpy(h + 8, "WAVE", 4);
+    memcpy(h + 12, "fmt ", 4); u32(16, 16); u16(20, 1); u16(22, 1);
+    u32(24, AUDIO_SAMPLE_RATE); u32(28, AUDIO_SAMPLE_RATE * 2); u16(32, 2); u16(34, 16);
+    memcpy(h + 36, "data", 4); u32(40, dataLen);
+    f.write(h, sizeof(h));
+}
+
+// Пишем во временный файл и переименовываем, чтобы при сбое не остался обрезанный mic.wav
+static bool saveMicFile(const uint8_t *data, size_t len) {
+    const char *tmp = MIC_FILE_PATH ".tmp";
+    unsigned long t0 = millis();
+    File f = LittleFS.open(tmp, "w");
+    if (!f) return false;
+    writeWavHeader(f, len);
+    size_t written = 0;
+    while (written < len) {
+        size_t n = f.write(data + written, min((size_t)4096, len - written));
+        if (n == 0) break;
+        written += n;
+        vTaskDelay(1); // Отдаем ядро loop(): WebServer отвечает на /api/status во время записи
+    }
+    unsigned long tWrite = millis();
+    f.close();
+    if (written != len) {
+        LittleFS.remove(tmp);
+        return false;
+    }
+    unsigned long tClose = millis();
+    LittleFS.remove(MIC_FILE_PATH);
+    bool ok = LittleFS.rename(tmp, MIC_FILE_PATH);
+    Serial.printf("[TRACE] saveMicFile | %u bytes: write %lu ms, close %lu ms, rename %lu ms\n",
+                  len, tWrite - t0, tClose - tWrite, millis() - tClose);
+    return ok;
 }
 
 void audioStreamTask(void *pvParameters) {
@@ -43,40 +90,81 @@ void audioStreamTask(void *pvParameters) {
     // Диагностика: отличить "нет данных от I2S" от "данные есть, но нули"
     uint32_t totalBytes = 0, emptyReads = 0;
     int32_t peak = 0;
+    // Первые ~100 мс после включения PDM фильтр выдает щелчок, их не отдаем
+    uint32_t skipBytes = AUDIO_SAMPLE_RATE * 2 / 10;
+    // ФВЧ ~20 Гц: у PDM фильтра постоянное смещение (~-1400) и медленный дрейф,
+    // которые без фильтра дают RMS в сотни при тишине
+    const float hpA = 0.992f;
+    float hpX = 0, hpY = 0;
+    bool hpInit = false;
+
+    // Копия первых MIC_FILE_MAX_SEC секунд в PSRAM, на флеш пишем после записи,
+    // чтобы стирание секторов LittleFS не приводило к переполнению DMA микрофона
+    const size_t fileCap = MIC_FILE_MAX_SEC * AUDIO_SAMPLE_RATE * 2;
+    uint8_t *fileBuf = (uint8_t *)heap_caps_malloc(fileCap, MALLOC_CAP_SPIRAM);
+    size_t fileLen = 0;
+    if (!fileBuf) Serial.println("[WARN] audioStreamTask | no PSRAM buffer, " MIC_FILE_PATH " will not be saved");
 
     while (DoorAudio::isRecording && micClient.connected() && (millis() - startTime < maxDurationMs)) {
-        esp_err_t err = i2s_read(I2S_MIC_PORT, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
-
-        if (err == ESP_OK && bytesRead > 0) {
-            const int16_t *samples = (const int16_t *)readBuffer;
-            for (size_t i = 0; i < bytesRead / 2; i++) {
-                int32_t v = abs((int32_t)samples[i]); // int16 не вмещает |-32768|
-                if (v > peak) peak = v;
-            }
-            totalBytes += bytesRead;
-            char chunkHeader[16];
-            int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", bytesRead);
-            micClient.write((uint8_t*)chunkHeader, headerLen);
-            micClient.write(readBuffer, bytesRead);
-            micClient.write((uint8_t*)"\r\n", 2);
-            micClient.flush();
-        } else {
+        esp_err_t err = i2s_channel_read(micChan, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(200));
+        if (err != ESP_OK || bytesRead == 0) {
             emptyReads++;
+            continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+        int16_t *pcm = (int16_t *)readBuffer;
+        if (!hpInit) { hpX = pcm[0]; hpInit = true; }
+        for (size_t i = 0; i < bytesRead / 2; i++) {
+            float x = pcm[i];
+            hpY = hpA * (hpY + x - hpX);
+            hpX = x;
+            pcm[i] = (int16_t)constrain(lrintf(hpY), -32768, 32767);
+        }
+        if (skipBytes) {
+            size_t n = min((size_t)skipBytes, bytesRead);
+            skipBytes -= n;
+            if (n == bytesRead) continue;
+            memmove(readBuffer, readBuffer + n, bytesRead - n);
+            bytesRead -= n;
+        }
+        const int16_t *samples = (const int16_t *)readBuffer;
+        for (size_t i = 0; i < bytesRead / 2; i++) {
+            int32_t v = abs((int32_t)samples[i]); // int16 не вмещает |-32768|
+            if (v > peak) peak = v;
+        }
+        totalBytes += bytesRead;
+        if (fileBuf && fileLen < fileCap) {
+            size_t n = min(bytesRead, fileCap - fileLen);
+            memcpy(fileBuf + fileLen, readBuffer, n);
+            fileLen += n;
+        }
+        char chunkHeader[16];
+        int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", bytesRead);
+        micClient.write((uint8_t*)chunkHeader, headerLen);
+        micClient.write(readBuffer, bytesRead);
+        micClient.write((uint8_t*)"\r\n", 2);
     }
+    // Микрофон засыпает, DMA буферы остаются выделенными до следующего /mic/start
+    i2s_channel_disable(micChan);
 
     if (micClient.connected()) {
         micClient.write((uint8_t*)"0\r\n\r\n", 5);
-        micClient.flush();
         micClient.stop();
     }
-    // Микрофон засыпает, DMA буферы остаются выделенными до следующего /mic/start
-    i2s_stop(I2S_MIC_PORT);
+    // Файл пишем уже после закрытия потока: 10 с (320 КБ) пишутся во флеш ~4 с.
+    // Панель ждет, пока /api/status не покажет mic.saving = false
+    bool saved = false;
+    DoorAudio::isSaving = fileBuf && fileLen > 0;
     DoorAudio::isRecording = false;
+    if (fileBuf) {
+        // Приоритет как у loopTask, иначе WebServer на том же ядре стоит все ~4 с записи
+        vTaskPrioritySet(NULL, 1);
+        if (fileLen > 0) saved = saveMicFile(fileBuf, fileLen);
+        heap_caps_free(fileBuf);
+    }
+    DoorAudio::isSaving = false;
     micTaskHandle = NULL;
-    Serial.printf("[EXIT] audioStreamTask | return: sent %u bytes, empty reads %u, peak %ld\n",
-                  totalBytes, emptyReads, (long)peak);
+    Serial.printf("[EXIT] audioStreamTask | return: sent %u bytes, empty reads %u, peak %ld, %s %u bytes: %s\n",
+                  totalBytes, emptyReads, (long)peak, MIC_FILE_PATH, fileLen, saved ? "saved" : "NOT saved");
     vTaskDelete(NULL);
 }
 
@@ -90,46 +178,32 @@ void DoorAudio::initI2SMic() {
     Serial.printf("[ENTER] initI2SMic | I2S_MIC_PORT: %d \n" , I2S_MIC_PORT);
     logDmaHeap("initI2SMic");
 
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = 0, // Аллокатор сам подберет свободную линию прерывания
-        .dma_buf_count = AUDIO_DMA_BUF_COUNT,
-        .dma_buf_len = AUDIO_DMA_BUF_LEN,
-        .use_apll = false
+    i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_MIC_PORT, I2S_ROLE_MASTER);
+    chanCfg.dma_desc_num = AUDIO_DMA_BUF_COUNT;
+    chanCfg.dma_frame_num = AUDIO_DMA_BUF_LEN;
+    esp_err_t err = i2s_new_channel(&chanCfg, NULL, &micChan);
+    if (err != ESP_OK) {
+        // 0x101 ESP_ERR_NO_MEM - нет DMA памяти, 0x105 ESP_ERR_NOT_FOUND - порт или прерывание заняты
+        Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_new_channel failed with code 0x%x\n", err);
+        return;
+    }
+
+    i2s_pdm_rx_config_t pdmCfg = {
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .clk = (gpio_num_t)I2S_MIC_CLK,
+            .din = (gpio_num_t)I2S_MIC_DATA,
+            .invert_flags = { .clk_inv = false },
+        },
     };
-
-    i2s_pin_config_t pin_config = {
-        .mck_io_num = I2S_PIN_NO_CHANGE, // Иначе по умолчанию 0 -> MCLK на GPIO0 (кнопка BOOT)
-        .bck_io_num = I2S_PIN_NO_CHANGE,
-        .ws_io_num = I2S_MIC_CLK,        // В режиме PDM тактовый сигнал выводится через WS
-        .data_out_num = I2S_PIN_NO_CHANGE,
-        .data_in_num = I2S_MIC_DATA
-    };
-
-    esp_err_t err = i2s_driver_install(I2S_MIC_PORT, &i2s_config, 0, NULL);
+    err = i2s_channel_init_pdm_rx_mode(micChan, &pdmCfg);
     if (err != ESP_OK) {
-        // 0x101 ESP_ERR_NO_MEM - нет DMA памяти, 0x105 ESP_ERR_NOT_FOUND - нет свободного прерывания
-        Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_driver_install failed with code 0x%x\n", err);
+        Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_channel_init_pdm_rx_mode failed with code 0x%x\n", err);
         return;
     }
 
-    err = i2s_set_pin(I2S_MIC_PORT, &pin_config);
-    if (err != ESP_OK) {
-        Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_set_pin failed with code 0x%x\n", err);
-        return;
-    }
-    err = i2s_set_clk(I2S_MIC_PORT, AUDIO_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
-    if (err != ESP_OK) {
-        Serial.printf("[EXIT ERROR] initI2SMic | error: i2s_set_clk failed with code 0x%x\n", err);
-        return;
-    }
-
-    i2s_zero_dma_buffer(I2S_MIC_PORT);
-    i2s_stop(I2S_MIC_PORT); // Спит до /mic/start
+    // Канал остается выключенным (READY) до /mic/start
     micReady = true;
     Serial.println("[EXIT] initI2SMic | return: success");
 }
@@ -138,45 +212,37 @@ void DoorAudio::initI2SSpeaker() {
     Serial.printf("[ENTER] initI2SSpeaker | I2S_SPK_PORT: %d \n" , I2S_SPK_PORT);
     logDmaHeap("initI2SSpeaker");
 
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        // Формат изменен на ПРАВЫЙ канал. Работает, если CTRL подключен к 3.3V
-        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
-        .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_STAND_I2S),
-        .intr_alloc_flags = 0, // Аллокатор сам подберет свободную линию прерывания
-        .dma_buf_count = AUDIO_DMA_BUF_COUNT,
-        .dma_buf_len = AUDIO_DMA_BUF_LEN,
-        .use_apll = false,    // Для 16kHz APLL не обязателен
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0
-    };
-
-    i2s_pin_config_t pin_config = {
-        .mck_io_num = I2S_PIN_NO_CHANGE, // Иначе по умолчанию 0 -> MCLK на GPIO0 (кнопка BOOT)
-        .bck_io_num = I2S_SPK_BCLK,
-        .ws_io_num = I2S_SPK_LRC,
-        .data_out_num = I2S_SPK_DIN,
-        .data_in_num = I2S_PIN_NO_CHANGE
-    };
-
-    esp_err_t err = i2s_driver_install(I2S_SPK_PORT, &i2s_config, 0, NULL);
+    i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_SPK_PORT, I2S_ROLE_MASTER);
+    chanCfg.dma_desc_num = AUDIO_DMA_BUF_COUNT;
+    chanCfg.dma_frame_num = AUDIO_DMA_BUF_LEN;
+    chanCfg.auto_clear = true; // При нехватке данных уходят нули, а не повтор старого буфера
+    esp_err_t err = i2s_new_channel(&chanCfg, &spkChan, NULL);
     if (err != ESP_OK) {
-        // 0x101 ESP_ERR_NO_MEM - нет DMA памяти, 0x105 ESP_ERR_NOT_FOUND - нет свободного прерывания
-        Serial.printf("[EXIT ERROR] initI2SSpeaker | error: i2s_driver_install failed with code 0x%x\n", err);
+        Serial.printf("[EXIT ERROR] initI2SSpeaker | error: i2s_new_channel failed with code 0x%x\n", err);
         return;
     }
 
-    err = i2s_set_pin(I2S_SPK_PORT, &pin_config);
+    i2s_std_config_t stdCfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED, // Иначе MCLK может оказаться на GPIO0 (кнопка BOOT)
+            .bclk = (gpio_num_t)I2S_SPK_BCLK,
+            .ws = (gpio_num_t)I2S_SPK_LRC,
+            .dout = (gpio_num_t)I2S_SPK_DIN,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+        },
+    };
+    // Моно в оба слота: усилитель играет при любом выборе канала L/R на его входе
+    stdCfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+    err = i2s_channel_init_std_mode(spkChan, &stdCfg);
     if (err != ESP_OK) {
-        Serial.printf("[EXIT ERROR] initI2SSpeaker | error: i2s_set_pin failed with code 0x%x\n", err);
+        Serial.printf("[EXIT ERROR] initI2SSpeaker | error: i2s_channel_init_std_mode failed with code 0x%x\n", err);
         return;
     }
 
-    // Очищаем DMA буфер, чтобы убрать шум после остановки генерации
-    i2s_zero_dma_buffer(I2S_SPK_PORT);
-    i2s_stop(I2S_SPK_PORT); // Спит до начала воспроизведения
+    // Канал выключен до начала воспроизведения
     speakerReady = true;
     Serial.println("[EXIT] initI2SSpeaker | return: success");
 }
@@ -200,7 +266,7 @@ void DoorAudio::playBeep() {
         for (int i = 0; i < 256; i++) {
             chunk[i] = (((sent + i) % 16) < 8) ? 8000 : -8000;
         }
-        esp_err_t err = i2s_write(I2S_SPK_PORT, chunk, sizeof(chunk), &bytes_written, portMAX_DELAY);
+        esp_err_t err = speakerWrite(chunk, sizeof(chunk), &bytes_written);
         if (err != ESP_OK) {
             Serial.printf("[ERROR] playBeep | error: i2s_write failed with code 0x%x\n", err);
             break;
@@ -266,9 +332,10 @@ void DoorAudio::handleStartMic(WebServer& server) {
         Serial.println("[EXIT ERROR] handleStartMic | error: Microphone not initialized");
         return;
     }
-    // micTaskHandle сбрасывается только после i2s_stop, поэтому проверяем и его
+    // micTaskHandle сбрасывается только после сохранения mic.wav, поэтому проверяем и его
     if (isRecording || micTaskHandle != NULL) {
-        server.send(400, "text/plain", "Recording already in progress");
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(409, "text/plain", isSaving ? "Busy: saving " MIC_FILE_PATH : "Recording already in progress");
         Serial.println("[EXIT ERROR] handleStartMic | error: Recording in progress");
         return;
     }
@@ -284,11 +351,11 @@ void DoorAudio::handleStartMic(WebServer& server) {
     micClient.println("Access-Control-Allow-Origin: *");
     micClient.println("Content-Type: application/octet-stream");
     micClient.println("Transfer-Encoding: chunked");
-    micClient.println("Connection: keep-alive");
+    micClient.println("Connection: close");
     micClient.println();
     micClient.flush();
 
-    i2s_start(I2S_MIC_PORT);
+    i2s_channel_enable(micChan);
     // Звук важнее видео: приоритет выше, чем у httpd потока камеры (5), который живет на Core 0
     xTaskCreatePinnedToCore(audioStreamTask, "AudioStream", 8192, (void *)(uintptr_t)(sec * 1000), 6, &micTaskHandle, 1);
     Serial.println("[EXIT] handleStartMic | return: Task started");
@@ -342,7 +409,7 @@ void DoorAudio::handlePlayStreamUpload(WebServer& server) {
             len -= 44;
         }
 
-        esp_err_t err = i2s_write(I2S_SPK_PORT, data, len, &bytesWritten, portMAX_DELAY);
+        esp_err_t err = speakerWrite(data, len, &bytesWritten);
         if (err != ESP_OK) {
             Serial.printf("[EXIT ERROR] handlePlayStreamUpload | error: i2s_write failed %d\n", err);
         }
@@ -500,7 +567,7 @@ void DoorAudio::handlePlayFile(WebServer& server) {
         size_t n = f.read(buf, left > sizeof(buf) ? sizeof(buf) : left);
         if (n == 0) break;
         size_t written = 0;
-        i2s_write(I2S_SPK_PORT, buf, n, &written, portMAX_DELAY);
+        speakerWrite(buf, n, &written);
         left -= n;
     }
     speakerStop(true);
@@ -524,4 +591,25 @@ void DoorAudio::handleDeleteFile(WebServer& server) {
     }
     server.send(200, "text/plain", "Deleted " + path);
     Serial.println("[EXIT] handleDeleteFile | return: OK");
+}
+
+// Отдает файл из LittleFS: GET /api/download?name=mic.wav (для прослушивания в браузере)
+void DoorAudio::handleDownloadFile(WebServer& server) {
+    Serial.println("[ENTER] handleDownloadFile | params: WebServer");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    String path;
+    if (!getSafeFileName(server, path)) {
+        server.send(400, "text/plain", "Bad Request: invalid name");
+        return;
+    }
+    File f = LittleFS.open(path, "r");
+    if (!f) {
+        server.send(404, "text/plain", "File not found: " + path);
+        return;
+    }
+    String type = path.endsWith(".wav") ? "audio/wav" : path.endsWith(".html") ? "text/html" : "application/octet-stream";
+    server.sendHeader("Cache-Control", "no-store"); // mic.wav перезаписывается при каждой записи
+    size_t sent = server.streamFile(f, type);
+    f.close();
+    Serial.printf("[EXIT] handleDownloadFile | return: sent %u bytes\n", sent);
 }
