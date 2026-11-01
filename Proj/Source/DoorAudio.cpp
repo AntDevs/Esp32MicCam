@@ -40,17 +40,28 @@ void audioStreamTask(void *pvParameters) {
     size_t bytesRead = 0;
     unsigned long startTime = millis();
     unsigned long maxDurationMs = (unsigned long)(uintptr_t)pvParameters;
+    // Диагностика: отличить "нет данных от I2S" от "данные есть, но нули"
+    uint32_t totalBytes = 0, emptyReads = 0;
+    int32_t peak = 0;
 
     while (DoorAudio::isRecording && micClient.connected() && (millis() - startTime < maxDurationMs)) {
         esp_err_t err = i2s_read(I2S_MIC_PORT, readBuffer, bufferSize, &bytesRead, pdMS_TO_TICKS(100));
 
         if (err == ESP_OK && bytesRead > 0) {
+            const int16_t *samples = (const int16_t *)readBuffer;
+            for (size_t i = 0; i < bytesRead / 2; i++) {
+                int32_t v = abs((int32_t)samples[i]); // int16 не вмещает |-32768|
+                if (v > peak) peak = v;
+            }
+            totalBytes += bytesRead;
             char chunkHeader[16];
             int headerLen = snprintf(chunkHeader, sizeof(chunkHeader), "%x\r\n", bytesRead);
             micClient.write((uint8_t*)chunkHeader, headerLen);
             micClient.write(readBuffer, bytesRead);
             micClient.write((uint8_t*)"\r\n", 2);
             micClient.flush();
+        } else {
+            emptyReads++;
         }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
@@ -64,7 +75,8 @@ void audioStreamTask(void *pvParameters) {
     i2s_stop(I2S_MIC_PORT);
     DoorAudio::isRecording = false;
     micTaskHandle = NULL;
-    Serial.println("[EXIT] audioStreamTask | return: void");
+    Serial.printf("[EXIT] audioStreamTask | return: sent %u bytes, empty reads %u, peak %ld\n",
+                  totalBytes, emptyReads, (long)peak);
     vTaskDelete(NULL);
 }
 

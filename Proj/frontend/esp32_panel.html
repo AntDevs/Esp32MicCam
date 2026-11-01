@@ -426,10 +426,27 @@ function playLive(int16) {
     micNextTime += buf.duration;
 }
 
+// RMS без постоянной составляющей: у PDM микрофона бывает смещение нуля
 function rms(int16) {
-    let sum = 0;
-    for (let i = 0; i < int16.length; i++) sum += int16[i] * int16[i];
-    return Math.sqrt(sum / (int16.length || 1));
+    return levelStats(int16).rms;
+}
+
+function levelStats(int16) {
+    const n = int16.length || 1;
+    let sum = 0, sq = 0, peak = 0;
+    for (let i = 0; i < int16.length; i++) {
+        const v = int16[i];
+        sum += v; sq += v * v;
+        if (Math.abs(v) > peak) peak = Math.abs(v);
+    }
+    const mean = sum / n;
+    return { rms: Math.sqrt(Math.max(0, sq / n - mean * mean)), peak };
+}
+
+// Шкала в дБ: -60..0 dBFS -> 0..100%. Линейная шкала прячет тихий фон (RMS ~100 = 0.3%)
+function levelPercent(rmsValue, gain) {
+    const db = 20 * Math.log10(Math.max(rmsValue * gain, 1) / 32768);
+    return Math.max(0, Math.min(100, (db + 60) / 60 * 100));
 }
 
 // Записывает поток с /mic/start. Возвращает Int16Array с сэмплами
@@ -448,6 +465,12 @@ async function recordMic(seconds, live) {
     log(`Запись ${seconds} с...`);
 
     let carry = null; // нечетный байт, разрезанный между чанками
+    let peak = 0;
+    $('micInfo').textContent = 'ожидание данных...';
+    // Если прошивка ответила, но байты не идут, значит i2s_read ничего не возвращает
+    const noDataTimer = setTimeout(() => {
+        if (!micBytes) log('Нет данных от микрофона за 2 с: проверьте Serial (audioStreamTask)', 'warn');
+    }, 2000);
     try {
         const res = await fetch(api(`/mic/start?sec=${seconds}`), { signal: micAbort.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -466,14 +489,16 @@ async function recordMic(seconds, live) {
             const samples = new Int16Array(bytes.slice().buffer);
             micChunks.push(samples);
             micBytes += bytes.length;
-            const level = Math.min(100, rms(samples) * +$('micGain').value / 32768 * 300);
-            $('micLevel').style.width = level + '%';
-            $('micInfo').textContent = `${((performance.now() - micStartedAt) / 1000).toFixed(1)} с · ${kb(micBytes)}`;
+            const st = levelStats(samples);
+            peak = Math.max(peak, st.peak);
+            $('micLevel').style.width = levelPercent(st.rms, +$('micGain').value) + '%';
+            $('micInfo').textContent = `${((performance.now() - micStartedAt) / 1000).toFixed(1)} с · ${kb(micBytes)} · RMS ${st.rms.toFixed(0)} · пик ${st.peak}`;
             if (live) playLive(samples);
         }
     } catch (e) {
         if (e.name !== 'AbortError') log('Ошибка записи: ' + e.message, 'err');
     } finally {
+        clearTimeout(noDataTimer);
         $('btnMicStart').disabled = false;
         $('btnMicStop').disabled = true;
         $('btnMicStop').className = 'grow';
@@ -486,7 +511,10 @@ async function recordMic(seconds, live) {
     const all = new Int16Array(total);
     let off = 0;
     for (const c of micChunks) { all.set(c, off); off += c.length; }
-    log(`Запись завершена: ${(total / SAMPLE_RATE).toFixed(2)} с, ${kb(total * 2)}`, total ? 'ok' : 'err');
+    const st = levelStats(all);
+    log(`Запись завершена: ${(total / SAMPLE_RATE).toFixed(2)} с, ${kb(total * 2)}, RMS ${st.rms.toFixed(0)}, пик ${peak}`,
+        !total ? 'err' : peak === 0 ? 'warn' : 'ok');
+    if (total && peak === 0) log('Все сэмплы нулевые: микрофон не тактируется или DATA не на GPIO41', 'warn');
     return all;
 }
 
