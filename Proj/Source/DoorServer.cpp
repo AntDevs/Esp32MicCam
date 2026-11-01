@@ -73,7 +73,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
 // Одиночный JPEG снимок: GET http://host/capture (порт 80).
 // Не на порту 81: у httpd одна задача, и пока stream_handler крутит цикл, второй запрос туда не попадет.
-// esp_camera_fb_get() параллельно со стримом безопасен: при fb_count = 3 кадров хватает обоим
 static void handleCapture() {
     Serial.println("[ENTER] handleCapture | params: none");
     server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -82,14 +81,19 @@ static void handleCapture() {
         Serial.println("[EXIT ERROR] handleCapture | error: Camera not initialized");
         return;
     }
-    // Пока камера спит (XCLK на паузе), fb_get будет ждать кадр до таймаута и заблокирует WebServer
-    if (!doorServer.isCameraServerRunning()) {
-        server.send(409, "text/plain", "Camera stopped: call /cam/start first");
-        Serial.println("[EXIT ERROR] handleCapture | error: Camera stopped");
-        return;
-    }
+    // Камера спит (XCLK на паузе): будим на один кадр и после снимка снова усыпляем
+    bool wake = !doorServer.isCameraServerRunning();
+    if (wake) doorVideo.start();
+
+    // Стрим (httpd, приоритет 5) тоже ждет в esp_camera_fb_get(), а FreeRTOS отдает новый кадр
+    // самой приоритетной ждущей задаче: loopTask (приоритет 1) получал только таймаут 4 с.
+    // На время ожидания кадра поднимаемся выше стрима
+    UBaseType_t prio = uxTaskPriorityGet(NULL);
+    vTaskPrioritySet(NULL, 6);
     camera_fb_t *fb = esp_camera_fb_get();
+    vTaskPrioritySet(NULL, prio);
     if (!fb) {
+        if (wake) doorVideo.stop();
         server.send(500, "text/plain", "Camera capture failed");
         Serial.println("[EXIT ERROR] handleCapture | error: Camera capture failed");
         return;
@@ -100,7 +104,8 @@ static void handleCapture() {
     size_t sent = server.client().write(fb->buf, fb->len);
     size_t len = fb->len;
     esp_camera_fb_return(fb);
-    Serial.printf("[EXIT] handleCapture | return: sent %u/%u bytes\n", sent, len);
+    if (wake) doorVideo.stop();
+    Serial.printf("[EXIT] handleCapture | return: sent %u/%u bytes%s\n", sent, len, wake ? " (camera woken)" : "");
 }
 
 // Состояние системы и ресурсов для тестовой панели: GET /api/status

@@ -6,6 +6,9 @@
 
 void setup() {
     Serial.begin(115200);
+    // USB CDC: если плата подключена к ПК, но монитор порта закрыт, каждый print ждал бы
+    // освобождения буфера до 100 мс и тормозил WebServer. Без читателя логи просто теряются
+    Serial.setTxTimeoutMs(0);
     Serial.println("\n[ENTER] setup | params: none");
 
 // 1. СТРОГО ПЕРЕД WI-FI И FS: Захватываем DMA память камеры

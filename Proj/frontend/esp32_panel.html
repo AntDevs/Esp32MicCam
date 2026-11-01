@@ -110,7 +110,13 @@
                 <button class="b-err grow" id="btnVideoStop" onclick="stopVideo()">Остановить</button>
                 <button class="b-info" onclick="takeSnapshot()">Снимок</button>
             </div>
-            <a id="snapLink" class="muted hidden" download="capture.jpg" style="display:block;margin-top:6px">Скачать последний снимок</a>
+            <div id="snapBox" class="hidden" style="margin-top: 10px">
+                <div class="row" style="justify-content: space-between">
+                    <span class="muted">Последний снимок <span id="snapInfo" class="mono"></span></span>
+                    <a id="snapLink" class="muted" download="capture.jpg">Скачать</a>
+                </div>
+                <img id="snapImg" alt="Снимок" style="display:block; width:100%; margin-top:6px; border-radius:6px">
+            </div>
 
             <div class="settings">
                 <label class="muted" for="cFramesize">Разрешение</label>
@@ -387,22 +393,22 @@ async function takeSnapshot() {
     try {
         const t0 = performance.now();
         // Порт 80: httpd на 81 занят циклом /stream и второй запрос не обслужит
+        // Если камера выключена, прошивка будит ее на один кадр (~0.5 с)
         const res = await fetch(api('/capture') + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const blob = await res.blob();
+        const ms = Math.round(performance.now() - t0);
+        // Показываем снимок отдельно от потока, иначе при включенном видео его не видно
+        if ($('snapLink').href.startsWith('blob:')) URL.revokeObjectURL($('snapLink').href);
         const url = URL.createObjectURL(blob);
-        const link = $('snapLink');
-        link.href = url;
-        link.classList.remove('hidden');
-        if ($('streamImg').classList.contains('hidden')) {
-            $('streamImg').src = url;
-            $('streamImg').classList.remove('hidden');
-            $('streamPlaceholder').classList.add('hidden');
-        }
-        log(`Снимок ${kb(blob.size)} за ${Math.round(performance.now() - t0)} мс`, 'ok');
+        $('snapLink').href = url;
+        $('snapImg').src = url;
+        $('snapInfo').textContent = `${kb(blob.size)} · ${new Date().toLocaleTimeString()}`;
+        $('snapBox').classList.remove('hidden');
+        log(`Снимок ${kb(blob.size)} за ${ms} мс`, 'ok');
         return blob;
     } catch (e) {
-        log('Снимок не получен: ' + e.message + ' (камера запущена?)', 'err');
+        log('Снимок не получен: ' + e.message, 'err');
         return null;
     }
 }
