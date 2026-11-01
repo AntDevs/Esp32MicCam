@@ -237,7 +237,7 @@ void DoorAudio::playBeep() {
 //     Serial.printf("[EXIT] DoorAudio | sendSound: %d \n" , I2S_SPK_PORT);
 
 
-void DoorAudio::begin() {
+void DoorAudio::start() {
     Serial.println("[ENTER] DoorAudio::begin | params: none");
     // Оба драйвера ставятся один раз, пока внутренняя DMA память не раздроблена Wi-Fi.
     // Дальше только i2s_start/i2s_stop, без install/uninstall.

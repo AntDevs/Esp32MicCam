@@ -375,8 +375,9 @@ async function stopVideo() {
 async function takeSnapshot() {
     try {
         const t0 = performance.now();
-        const res = await fetch(camApi('/capture') + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        // Порт 80: httpd на 81 занят циклом /stream и второй запрос не обслужит
+        const res = await fetch(api('/capture') + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const link = $('snapLink');

@@ -29,7 +29,7 @@
 class DoorAudio {
 public:
     // Устанавливает оба I2S драйвера один раз. Вызывать в setup() ДО WiFi.begin()
-    void begin();
+    void start();
     void playBeep();
     static void handleStartMic(WebServer& server);
     static void handleStopMic(WebServer& server);

@@ -71,26 +71,36 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return res;
 }
 
-// Одиночный JPEG снимок: http://host:81/capture
-static esp_err_t capture_handler(httpd_req_t *req) {
-    Serial.println("[ENTER] capture_handler | params: httpd_req_t *req");
+// Одиночный JPEG снимок: GET http://host/capture (порт 80).
+// Не на порту 81: у httpd одна задача, и пока stream_handler крутит цикл, второй запрос туда не попадет.
+// esp_camera_fb_get() параллельно со стримом безопасен: при fb_count = 3 кадров хватает обоим
+static void handleCapture() {
+    Serial.println("[ENTER] handleCapture | params: none");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     if (!doorVideo.isInitialized()) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+        server.send(500, "text/plain", "Camera not initialized");
+        Serial.println("[EXIT ERROR] handleCapture | error: Camera not initialized");
+        return;
+    }
+    // Пока камера спит (XCLK на паузе), fb_get будет ждать кадр до таймаута и заблокирует WebServer
+    if (!doorServer.isCameraServerRunning()) {
+        server.send(409, "text/plain", "Camera stopped: call /cam/start first");
+        Serial.println("[EXIT ERROR] handleCapture | error: Camera stopped");
+        return;
     }
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("[EXIT ERROR] capture_handler | error: Camera capture failed");
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
+        server.send(500, "text/plain", "Camera capture failed");
+        Serial.println("[EXIT ERROR] handleCapture | error: Camera capture failed");
+        return;
     }
-    httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
-    esp_err_t res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+    server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
+    server.setContentLength(fb->len);
+    server.send(200, "image/jpeg", "");
+    size_t sent = server.client().write(fb->buf, fb->len);
+    size_t len = fb->len;
     esp_camera_fb_return(fb);
-    Serial.printf("[EXIT] capture_handler | return: code %d\n", res);
-    return res;
+    Serial.printf("[EXIT] handleCapture | return: sent %u/%u bytes\n", sent, len);
 }
 
 // Состояние системы и ресурсов для тестовой панели: GET /api/status
@@ -215,6 +225,7 @@ void DoorServer::registerRoutes() {
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/cam/set", HTTP_GET, handleCamSet);
+    server.on("/capture", HTTP_GET, handleCapture);
 
     // Файлы в LittleFS: список, проигрывание на динамик, удаление
     server.on("/api/files", HTTP_GET, []() {
@@ -271,8 +282,8 @@ void DoorServer::registerRoutes() {
     });
 }
 
-void DoorServer::begin() {
-    Serial.println("[ENTER] DoorServer::begin | params: none");
+void DoorServer::start() {
+    Serial.println("[ENTER] DoorServer::start | params: none");
     initWiFi();
     registerRoutes();
     server.begin();
@@ -281,7 +292,7 @@ void DoorServer::begin() {
     Serial.printf("[TRACE] Admin Panel: http://%s.local/\n", dns_cam);
     Serial.printf("[TRACE] Streaming:   http://%s.local:81/stream\n", dns_cam);
     Serial.println("==================================================");
-    Serial.println("[EXIT] DoorServer::begin | return: void");
+    Serial.println("[EXIT] DoorServer::start | return: void");
 }
 
 void DoorServer::handleClient() {
@@ -308,7 +319,7 @@ bool DoorServer::startCameraServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 81;
     config.core_id = 0;            // Видео на Core 0, аудио и loop() на Core 1
-    config.max_open_sockets = 2;   // Один зритель + запасной, экономим сокеты lwIP
+    config.max_open_sockets = 2;   // Один зритель + запасной (вытесняет зависший), экономим сокеты lwIP
     config.lru_purge_enable = true; // Новый клиент вытесняет зависшее соединение
 
     httpd_uri_t stream_uri = {
@@ -318,17 +329,9 @@ bool DoorServer::startCameraServer() {
         .user_ctx  = NULL
     };
 
-    httpd_uri_t capture_uri = {
-        .uri       = "/capture",
-        .method    = HTTP_GET,
-        .handler   = capture_handler,
-        .user_ctx  = NULL
-    };
-
     stream_stop_requested = false;
     if (httpd_start(&camera_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(camera_httpd, &stream_uri);
-        httpd_register_uri_handler(camera_httpd, &capture_uri);
         Serial.println("[INFO] Camera streaming server started on port 81");
     } else {
         Serial.println("[EXIT ERROR] startCameraServer | error: Failed to start httpd");

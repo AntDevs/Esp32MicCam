@@ -9,12 +9,12 @@ void setup() {
     Serial.println("\n[ENTER] setup | params: none");
 
 // 1. СТРОГО ПЕРЕД WI-FI И FS: Захватываем DMA память камеры
-    doorVideo.initCamera();
+    doorVideo.start();
     doorVideo.stop(); // Сразу переводим в сон (XCLK на паузе) до вызова /cam/start
 
 // 2. Тоже ДО Wi-Fi: ставим оба I2S драйвера, пока DMA память не раздроблена.
     // Микрофон и динамик сразу засыпают (i2s_stop) до запроса
-    doorAudio.begin();
+    doorAudio.start();
 
     // Инициализация файловой системы для загрузки файлов
     if (!LittleFS.begin(true)) {
@@ -22,7 +22,7 @@ void setup() {
     }
 
 // 3. Wi-Fi, mDNS и все HTTP маршруты
-    doorServer.begin();
+    doorServer.start();
 
     Serial.println("[EXIT] setup | return: void");
 }

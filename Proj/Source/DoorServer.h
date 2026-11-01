@@ -13,7 +13,7 @@
 class DoorServer {
     public:
         // Wi-Fi + mDNS + регистрация маршрутов. Вызывать ПОСЛЕ инициализации камеры и I2S
-        void begin();
+        void start();
         void handleClient();
 
         bool startCameraServer();
