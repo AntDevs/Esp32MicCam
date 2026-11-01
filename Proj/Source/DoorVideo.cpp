@@ -5,11 +5,6 @@ DoorVideo doorVideo;
 
 //bool camera_initialized = false;
 
-// Делаем переменные из .ino файла видимыми здесь
-extern httpd_handle_t camera_httpd;
-extern volatile bool stream_stop_requested;
-extern void startCameraServer();
-
 void DoorVideo::start() {
     if ( !initCamera() ) {
         Serial.println("[EXIT ERROR] DoorVideo::start | error: initCamera false");
@@ -23,22 +18,13 @@ void DoorVideo::start() {
     // 2. Очищаем DMA от старого или битого переходного кадра
     camera_fb_t *fb = esp_camera_fb_get();
     if (fb) esp_camera_fb_return(fb);
-
-    // Явно глобальная функция из .ino (раньше вызывался пустой метод класса)
-    ::startCameraServer();
+    // Сервер потока (порт 81) поднимает DoorServer::startCameraServer()
 }
 
 void DoorVideo::stop() {
     Serial.println("[ENTER] DoorVideo::stop");
-// 1. Освобождаем сетевые ресурсы и сокеты
-    if (camera_httpd != NULL) {
-        // Сначала просим stream_handler выйти из цикла, иначе httpd_stop() ждет вечно
-        stream_stop_requested = true;
-        httpd_stop(camera_httpd);
-        camera_httpd = NULL;
-        Serial.println("[TRACE] Streaming server stopped (Port 81 closed)");
-    }
-    
+// 1. Сервер потока (порт 81) к этому моменту уже остановлен DoorServer::stopCameraServer()
+
     // // 2. Уводим камеру в энергосберегающий режим (останавливает генерацию кадров)
     // sensor_t *s = esp_camera_sensor_get();
     // if (s != NULL) {
