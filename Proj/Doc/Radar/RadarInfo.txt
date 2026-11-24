@@ -1,0 +1,14 @@
+Hi-Link -> HLK-LD2410C
+
+VCC: Power supply input (5V)
+GND: Ground
+TX: UART Transmit (connect to RX of your microcontroller)
+RX: UART Receive (connect to TX of your microcontroller)
+OUT: GPIO Output (for presence detection signal)
+
+https://www.hlktech.com/en/Goods-239.html
+
+https://www.tinytronics.nl/en/home-automation/sensors/motion-and-presence/hi-link-hlk-ld2410c-24ghz-radar-sensor-module-with-bluetooth
+
+https://he.aliexpress.com/item/1005005637495945.html?spm=a2g0o.order_list.order_list_main.47.35881802j7TxPj&tblci=Gib8AywdbC50&gatewayAdapt=glo2isr
+
