@@ -58,6 +58,7 @@
     td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; }
     th { color: var(--muted); font-weight: 500; font-size: 12px; }
     td.r, th.r { text-align: right; }
+    .player { background: var(--inner); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
     #log { background: var(--inner); border: 1px solid var(--line); border-radius: 8px; height: 180px; overflow: auto;
            padding: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
     .l-ok { color: #6ee7b7; } .l-err { color: #fda4af; } .l-warn { color: #fcd34d; } .l-info { color: var(--muted); }
@@ -162,6 +163,7 @@
             <div class="row" style="margin-top: 10px">
                 <button class="b-info grow" id="btnMicStart" onclick="startMicStream()">● Начать запись</button>
                 <button class="grow" id="btnMicStop" onclick="stopMicStream()" disabled>■ Остановить</button>
+                <button class="grow" id="btnLivePause" onclick="toggleLive()" disabled>⏸ Пауза прослушивания</button>
             </div>
             <div style="margin-top: 12px">
                 <div class="row" style="justify-content: space-between">
@@ -171,41 +173,61 @@
                 <div class="bar meter"><i id="micLevel"></i></div>
             </div>
             <div class="row" style="margin-top: 10px">
-                <label class="muted" for="micGain">Усиление</label>
-                <input type="range" id="micGain" class="grow" min="1" max="16" step="1" value="4" oninput="mgv.textContent='×'+this.value">
-                <span id="mgv" class="mono muted">×4</span>
+                <label class="muted" for="micGain">Усиление на плате</label>
+                <input type="range" id="micGain" class="grow" min="1" max="64" step="1" value="8" oninput="mgv.textContent='×'+this.value">
+                <span id="mgv" class="mono muted">×8</span>
             </div>
             <audio id="micAudioPlayer" controls class="hidden"></audio>
-            <a id="micDownload" class="muted hidden" download="mic-boosted.wav">Скачать запись WAV (с усилением)</a>
-            <p class="muted">PDM микрофон тихий — усиление применяется к прослушиванию и к WAV.</p>
+            <div class="row hidden" id="micAudioPlayerCtl" data-audio="micAudioPlayer"></div>
+            <a id="micDownload" class="muted hidden" download="mic.wav">Скачать запись WAV</a>
+            <p class="muted">Усиление применяет прошивка (к потоку, mic.wav и динамику) и запоминает его.
+                Если пик держится около 30000 — уменьшите.</p>
             <div class="row" style="margin-top: 12px; justify-content: space-between">
                 <span class="muted">Файл в памяти ESP: <span class="mono">mic.wav</span></span>
                 <span id="micFileInfo" class="mono muted">—</span>
             </div>
             <audio id="micFilePlayer" controls preload="none" class="hidden"></audio>
+            <div class="row hidden" id="micFilePlayerCtl" data-audio="micFilePlayer"></div>
             <div class="row" style="margin-top: 6px">
                 <button class="b-spk grow" id="btnMicFileSpk" onclick="playStoredFile(MIC_FILE)" disabled>▶ На динамике ESP</button>
                 <button class="grow" onclick="refreshFiles()">⟳ Обновить</button>
             </div>
-            <p class="muted">Каждая запись перезаписывает mic.wav: первые 10 с, без усиления.</p>
+            <p class="muted">Каждая запись перезаписывает mic.wav: первые 10 с.</p>
         </div>
     </div>
 
     <!-- Динамик -->
     <div class="card">
         <h2><span style="color:var(--spk)">●</span> Динамик (I2S1, 16 кГц моно)</h2>
+        <div class="player">
+            <div class="row" style="justify-content: space-between">
+                <span class="muted">На динамике: <span id="plName" class="mono">—</span></span>
+                <span id="plTime" class="mono muted">0:00 / 0:00</span>
+            </div>
+            <div class="bar"><i id="plProgress"></i></div>
+            <div class="row" style="margin-top: 8px">
+                <button class="b-spk grow" id="plToggle" onclick="spkToggle()" disabled>▶ Продолжить</button>
+                <button class="grow" id="plStop" onclick="spkCtl('stop')" disabled>⏹ Стоп</button>
+                <button class="grow" id="plRestart" onclick="spkCtl('restart')" disabled>⏮ Сначала</button>
+            </div>
+        </div>
         <div class="row">
             <button class="b-spk" onclick="playBeep()">Тестовый бип</button>
             <input type="file" id="audioStreamInput" accept="audio/*,.wav" class="grow">
             <button class="b-spk" id="btnStreamAudio" onclick="streamAudioFile()">Транслировать</button>
         </div>
         <div class="row" style="margin-top: 10px">
-            <label class="muted" for="spkVolume">Громкость</label>
-            <input type="range" id="spkVolume" class="grow" min="0.1" max="2" step="0.1" value="1" oninput="svv.textContent=Math.round(this.value*100)+'%'">
+            <label class="muted" for="spkVolume">Громкость на плате</label>
+            <input type="range" id="spkVolume" class="grow" min="0" max="100" step="5" value="100"
+                   oninput="svv.textContent=this.value+'%'" onchange="setSpeakerVolume(this.value)">
             <span id="svv" class="mono muted">100%</span>
+        </div>
+        <div class="row" style="margin-top: 6px">
             <label class="muted"><input type="checkbox" id="spkConvert" checked> конвертировать в 16 кГц моно</label>
         </div>
         <div class="bar"><i id="spkProgress"></i></div>
+        <p class="muted">Громкость применяет прошивка ко всему, что играет динамик (бип, трансляция, файлы, mic.wav),
+            и запоминает её. 50% ≈ −12 дБ, 25% ≈ −24 дБ.</p>
         <p class="muted">Прошивка играет сырой PCM 16 бит / 16 кГц / моно. Конвертация в браузере принимает любой формат (MP3, OGG, WAV 44.1 кГц стерео...).</p>
     </div>
 
@@ -312,6 +334,8 @@ function setBadge(id, state, label) {
 }
 
 // ---------------------------------------------------------------- статус
+let micGainSynced = false; // ползунок усиления берем из прошивки один раз, дальше он ведущий
+let spkVolumeSynced = false; // так же для громкости динамика
 let lastStatus = null;
 
 async function fetchStatus() {
@@ -334,9 +358,20 @@ async function refreshStatus(manual = false) {
     setBadge('bConn', 'on', 'на связи');
     setBadge('bCam', st.cam.init ? 'on' : 'bad', 'камера');
     setBadge('bStream', st.cam.streaming ? 'on' : 'off', 'стрим');
+    if (st.mic.gain && !micGainSynced) {
+        micGainSynced = true;
+        $('micGain').value = st.mic.gain;
+        mgv.textContent = '×' + st.mic.gain;
+    }
     setBadge('bMic', !st.mic.ready ? 'bad' : st.mic.recording || st.mic.saving ? 'rec' : 'on',
              st.mic.recording ? 'запись' : st.mic.saving ? 'сохранение' : 'микрофон');
     setBadge('bSpk', st.spk.ready ? 'on' : 'bad', 'динамик');
+    if (st.spk.player && !plTimer) showPlayer(st.spk.player);
+    if (typeof st.spk.volume === 'number' && !spkVolumeSynced) {
+        spkVolumeSynced = true;
+        $('spkVolume').value = st.spk.volume;
+        svv.textContent = st.spk.volume + '%';
+    }
 
     $('sHeap').textContent = `${kb(st.heap_free)} / ${kb(st.heap_min)}`;
     $('sDma').textContent = `${kb(st.dma_free)} / ${kb(st.dma_largest)}`;
@@ -424,17 +459,18 @@ let micBytes = 0;
 let micCtx = null;
 let micNextTime = 0;
 let micStartedAt = 0;
+let liveMuted = false; // пауза прослушивания: запись идет, звук не играет
 
-function int16ToFloat(int16, gain) {
+function int16ToFloat(int16) {
     const out = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) out[i] = Math.max(-1, Math.min(1, int16[i] / 32768 * gain));
+    for (let i = 0; i < int16.length; i++) out[i] = int16[i] / 32768;
     return out;
 }
 
 function playLive(int16) {
-    if (!micCtx) return;
+    if (!micCtx || liveMuted) return;
     const buf = micCtx.createBuffer(1, int16.length, SAMPLE_RATE);
-    buf.copyToChannel(int16ToFloat(int16, +$('micGain').value), 0);
+    buf.copyToChannel(int16ToFloat(int16), 0);
     const src = micCtx.createBufferSource();
     src.buffer = buf;
     src.connect(micCtx.destination);
@@ -461,8 +497,8 @@ function levelStats(int16) {
 }
 
 // Шкала в дБ: -60..0 dBFS -> 0..100%. Линейная шкала прячет тихий фон (RMS ~100 = 0.3%)
-function levelPercent(rmsValue, gain) {
-    const db = 20 * Math.log10(Math.max(rmsValue * gain, 1) / 32768);
+function levelPercent(rmsValue) {
+    const db = 20 * Math.log10(Math.max(rmsValue, 1) / 32768);
     return Math.max(0, Math.min(100, (db + 60) / 60 * 100));
 }
 
@@ -476,6 +512,9 @@ async function recordMic(seconds, live) {
         micCtx = new AudioContext();
         micNextTime = 0;
     }
+    liveMuted = false;
+    $('btnLivePause').disabled = !live;
+    $('btnLivePause').textContent = '⏸ Пауза прослушивания';
     $('btnMicStart').disabled = true;
     $('btnMicStop').disabled = false;
     $('btnMicStop').className = 'b-err grow';
@@ -489,7 +528,7 @@ async function recordMic(seconds, live) {
         if (!micBytes) log('Нет данных от микрофона за 2 с: проверьте Serial (audioStreamTask)', 'warn');
     }, 2000);
     try {
-        const res = await fetch(api(`/mic/start?sec=${seconds}`), { signal: micAbort.signal });
+        const res = await fetch(api(`/mic/start?sec=${seconds}&gain=${$('micGain').value}`), { signal: micAbort.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const reader = res.body.getReader();
         while (true) {
@@ -508,7 +547,7 @@ async function recordMic(seconds, live) {
             micBytes += bytes.length;
             const st = levelStats(samples);
             peak = Math.max(peak, st.peak);
-            $('micLevel').style.width = levelPercent(st.rms, +$('micGain').value) + '%';
+            $('micLevel').style.width = levelPercent(st.rms) + '%';
             $('micInfo').textContent = `${((performance.now() - micStartedAt) / 1000).toFixed(1)} с · ${kb(micBytes)} · RMS ${st.rms.toFixed(0)} · пик ${st.peak}`;
             if (live) playLive(samples);
         }
@@ -519,6 +558,7 @@ async function recordMic(seconds, live) {
         $('btnMicStart').disabled = false;
         $('btnMicStop').disabled = true;
         $('btnMicStop').className = 'grow';
+        $('btnLivePause').disabled = true;
         $('micLevel').style.width = '0';
         micAbort = null;
         if (micCtx) { const ctx = micCtx; micCtx = null; setTimeout(() => ctx.close(), 1500); }
@@ -558,15 +598,26 @@ async function startMicStream() {
     // Прошивка дописывает mic.wav до конца потока, так что файл уже обновлен
     await refreshFiles();
     if (!samples.length) return;
-    const gain = +$('micGain').value;
-    const boosted = new Int16Array(samples.length);
-    for (let i = 0; i < samples.length; i++) boosted[i] = Math.max(-32768, Math.min(32767, samples[i] * gain));
-    const url = URL.createObjectURL(encodeWav(boosted, SAMPLE_RATE));
+    const url = URL.createObjectURL(encodeWav(samples, SAMPLE_RATE));
     const player = $('micAudioPlayer');
     player.src = url;
     player.classList.remove('hidden');
+    $('micAudioPlayerCtl').classList.remove('hidden');
     $('micDownload').href = url;
     $('micDownload').classList.remove('hidden');
+}
+
+// Живое прослушивание нельзя отмотать: пауза глушит звук, «продолжить» включает его с текущего момента.
+// Всю запись целиком можно переслушать в плеере ниже после остановки.
+function toggleLive() {
+    liveMuted = !liveMuted;
+    if (liveMuted && micCtx) {
+        // Сбрасываем уже запланированные буферы: закрываем контекст и открываем новый
+        micCtx.close();
+        micCtx = new AudioContext();
+        micNextTime = 0;
+    }
+    $('btnLivePause').textContent = liveMuted ? '▶ Продолжить прослушивание' : '⏸ Пауза прослушивания';
 }
 
 async function stopMicStream() {
@@ -590,7 +641,7 @@ function encodeWav(int16, rate) {
 
 // Любой аудиофайл → WAV PCM 16 бит / 16 кГц / моно с канонным 44-байтным заголовком,
 // который прошивка отрезает в /api/stream_play
-async function convertToEspWav(file, volume) {
+async function convertToEspWav(file, volume = 1) {
     const ctx = new AudioContext();
     let decoded;
     try { decoded = await ctx.decodeAudioData(await file.arrayBuffer()); }
@@ -614,7 +665,83 @@ const isAudio = file => file.type.startsWith('audio/') || /\.(wav|mp3|ogg|m4a|aa
 
 // ---------------------------------------------------------------- динамик
 async function playBeep() {
-    return withBusy(() => request(api('/spr/start')));
+    const r = await withBusy(() => request(api('/spr/start')));
+    if (r.ok) showPlayer(r.text);
+    return r;
+}
+
+// ---------------------------------------------------------------- проигрыватель динамика ESP
+// Прошивка играет в фоне, поэтому во время звука работают пауза, стоп и «сначала».
+let plState = null;
+let plTimer = null;
+const fmtTime = ms => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const PL_NAMES = { beep: 'тестовый бип', stream: 'трансляция' };
+
+function showPlayer(json) {
+    let st = json;
+    if (typeof json === 'string') { try { st = JSON.parse(json); } catch { return; } }
+    if (!st || !st.state) return;
+    plState = st;
+    const has = st.src !== 'none';
+    const label = PL_NAMES[st.src] ? `${PL_NAMES[st.src]}${st.src === 'stream' && st.name ? ' · ' + st.name : ''}` : st.name.replace(/^\//, '');
+    $('plName').textContent = has ? label : '—';
+    const stateText = { playing: '', paused: ' · пауза', idle: has ? ' · остановлено' : '' }[st.state];
+    $('plTime').textContent = `${fmtTime(st.pos_ms)} / ${fmtTime(st.len_ms)}${st.loading ? ' …' : ''}${stateText}`;
+    $('plProgress').style.width = (st.len_ms ? Math.min(100, st.pos_ms / st.len_ms * 100) : 0) + '%';
+    $('plToggle').disabled = !has;
+    $('plToggle').textContent = st.state === 'playing' ? '⏸ Пауза' : st.state === 'paused' ? '▶ Продолжить' : '▶ Играть';
+    $('plStop').disabled = !has || st.state === 'idle';
+    $('plRestart').disabled = !has;
+    // Пока играет — опрашиваем позицию; остановились — опрос не нужен
+    const active = st.state === 'playing' || st.loading;
+    if (active && !plTimer) plTimer = setInterval(pollPlayer, 400);
+    if (!active && plTimer) { clearInterval(plTimer); plTimer = null; }
+}
+
+async function pollPlayer() {
+    const r = await request(api('/spk/ctl'), { timeout: 3000, quiet: true });
+    if (r.ok) showPlayer(r.text);
+}
+
+async function spkCtl(cmd) {
+    const r = await request(api('/spk/ctl?cmd=' + cmd), { quiet: true });
+    if (r.ok || r.status === 409) showPlayer(r.text);
+    else log(`Динамик: ${cmd} не выполнен (${r.status} ${r.text})`, 'err');
+    return r;
+}
+
+function spkToggle() {
+    return spkCtl(plState?.state === 'playing' ? 'pause' : 'resume');
+}
+
+// Ждет, пока динамик доиграет (для самопроверки)
+async function waitSpkIdle(timeoutMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        await new Promise(r => setTimeout(r, 500));
+        const r = await request(api('/spk/ctl'), { timeout: 3000, quiet: true });
+        if (r.ok) { showPlayer(r.text); if (plState.state === 'idle' && !plState.loading) return true; }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- плееры браузера
+// Под каждым <audio> кнопки: пауза/продолжить, стоп (в начало), сначала
+function setupAudioControls(ctlId) {
+    const row = $(ctlId);
+    const audio = $(row.dataset.audio);
+    const toggle = mkBtn('▶ Играть', 'b-info grow', () => audio.paused ? audio.play() : audio.pause());
+    const stop = mkBtn('⏹ Стоп', 'grow', () => { audio.pause(); audio.currentTime = 0; });
+    const restart = mkBtn('⏮ Сначала', 'grow', () => { audio.currentTime = 0; audio.play(); });
+    row.append(toggle, stop, restart);
+    const sync = () => toggle.textContent = !audio.paused ? '⏸ Пауза' : audio.currentTime > 0 && !audio.ended ? '▶ Продолжить' : '▶ Играть';
+    for (const ev of ['play', 'pause', 'ended', 'emptied', 'seeked']) audio.addEventListener(ev, sync);
+}
+
+async function setSpeakerVolume(val) {
+    spkVolumeSynced = true; // ползунок тронули — статус его больше не перезаписывает
+    const r = await request(api('/spk/volume?val=' + val));
+    if (!r.ok) log('Громкость не сохранена', 'err');
 }
 
 async function streamAudioFile() {
@@ -625,12 +752,13 @@ async function streamAudioFile() {
     try {
         await withBusy(async () => {
             let blob = file;
-            if ($('spkConvert').checked) blob = await convertToEspWav(file, +$('spkVolume').value);
+            if ($('spkConvert').checked) blob = await convertToEspWav(file);
             const fd = new FormData();
             fd.append('audioFile', blob, 'stream.wav');
             log(`Трансляция ${kb(blob.size)} на динамик...`);
             const r = await postWithProgress(api('/api/stream_play'), fd, $('spkProgress'));
-            log(`POST /api/stream_play → ${r.status} ${r.text}`, r.ok ? 'ok' : 'err');
+            log(`POST /api/stream_play → ${r.status}`, r.ok ? 'ok' : 'err');
+            if (r.ok) showPlayer(r.text); else log(r.text, 'err');
         });
     } catch (e) {
         log('Не удалось подготовить файл: ' + e.message, 'err');
@@ -650,7 +778,7 @@ async function uploadFile() {
         await withBusy(async () => {
             let blob = file, name = file.name;
             if (isAudio(file)) {
-                blob = await convertToEspWav(file, +$('spkVolume').value);
+                blob = await convertToEspWav(file);
                 name = file.name.replace(/\.[^.]+$/, '') + '.wav';
             }
             const fd = new FormData();
@@ -703,12 +831,14 @@ function showMicFile(f) {
     if (!f) {
         $('micFileInfo').textContent = 'нет файла';
         player.classList.add('hidden');
+        $('micFilePlayerCtl').classList.add('hidden');
         return;
     }
     $('micFileInfo').textContent = `${(Math.max(0, f.size - 44) / 2 / SAMPLE_RATE).toFixed(1)} с · ${kb(f.size)}`;
     // preload="none": WebServer однопоточный, файл качаем только по нажатию ▶
     player.src = api(`/api/download?name=${MIC_FILE}&t=${Date.now()}`);
     player.classList.remove('hidden');
+    $('micFilePlayerCtl').classList.remove('hidden');
 }
 
 // Скачивает mic.wav и разбирает его как PCM 16 бит моно
@@ -732,7 +862,9 @@ function mkBtn(text, cls, onClick) {
 }
 
 async function playStoredFile(name) {
-    await withBusy(() => request(api('/api/play_file?name=' + encodeURIComponent(name)), { timeout: 120000 }));
+    const r = await withBusy(() => request(api('/api/play_file?name=' + encodeURIComponent(name))));
+    if (r.ok) showPlayer(r.text);
+    return r;
 }
 
 async function deleteFile(name) {
@@ -835,8 +967,9 @@ async function runSelfTest() {
         });
 
         await step('Динамик: mic.wav', async () => {
-            const r = await withBusy(() => request(api('/api/play_file?name=' + MIC_FILE), { timeout: 30000 }));
+            const r = await playStoredFile(MIC_FILE);
             must(r.ok, r.text);
+            must(await waitSpkIdle(30000), 'не доиграл за 30 с');
             return 'запись с микрофона слышна на динамике?';
         });
 
@@ -859,6 +992,8 @@ async function runSelfTest() {
 window.addEventListener('load', () => {
     const h = location.hostname;
     if (h && h !== 'localhost' && h !== '127.0.0.1') $('espHost').value = location.host;
+    setupAudioControls('micAudioPlayerCtl');
+    setupAudioControls('micFilePlayerCtl');
     refreshStatus(true).then(st => { if (st) refreshFiles(); });
 });
 </script>

@@ -30,6 +30,13 @@
 #define MIC_FILE_PATH    "/mic.wav"
 #define MIC_FILE_MAX_SEC 10
 
+// Программное усиление микрофона: у PDM на ESP32-S3 нет аппаратного (amplify_num там не действует),
+// а чувствительность MSM261 -26 dBFS при 94 dB SPL дает речь на уровне -50 dBFS.
+// Значение хранится в NVS ("audio"/"mic_gain") и меняется через /mic/start?gain=N
+#define MIC_DEFAULT_GAIN 8
+#define MIC_MAX_GAIN     64
+#define SPK_DEFAULT_VOLUME 100 // %, как было до регулировки
+
 
 class DoorAudio {
 public:
@@ -49,11 +56,16 @@ public:
     static void handlePlayFile(WebServer& server);
     static void handleDeleteFile(WebServer& server);
     static void handleDownloadFile(WebServer& server);
+    static void handleSpeakerVolume(WebServer& server);
+    static void handlePlayerCtl(WebServer& server); // пауза/продолжить/стоп/сначала
+    static String playerJson();                     // состояние проигрывателя динамика
 
     static volatile bool isRecording;
     static volatile bool isSaving; // запись закончена, mic.wav пишется во флеш
     static bool micReady;
     static bool speakerReady;
+    static int micGain;
+    static int speakerVolume; // 0..100 %, применяется ко всему, что играет динамик
 private:
     void initI2SMic();
     void initI2SSpeaker();

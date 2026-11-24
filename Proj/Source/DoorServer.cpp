@@ -140,7 +140,10 @@ static void handleStatus() {
     json += "},\"mic\":{\"ready\":"; json += DoorAudio::micReady ? "true" : "false";
     json += ",\"recording\":";      json += DoorAudio::isRecording ? "true" : "false";
     json += ",\"saving\":";         json += DoorAudio::isSaving ? "true" : "false";
+    json += ",\"gain\":";           json += DoorAudio::micGain;
     json += "},\"spk\":{\"ready\":"; json += DoorAudio::speakerReady ? "true" : "false";
+    json += ",\"volume\":";         json += DoorAudio::speakerVolume;
+    json += ",\"player\":";         json += DoorAudio::playerJson();
     json += "},\"fs\":{\"total\":";  json += fsTotal;
     json += ",\"used\":";           json += fsUsed;
     json += "}}";
@@ -262,6 +265,14 @@ void DoorServer::registerRoutes() {
         DoorAudio::handleStopMic(server);
     });
 
+    server.on("/spk/ctl", HTTP_GET, []() {
+        DoorAudio::handlePlayerCtl(server);
+    });
+
+    server.on("/spk/volume", HTTP_GET, []() {
+        DoorAudio::handleSpeakerVolume(server);
+    });
+
     server.on("/spr/start", HTTP_GET, []() {
         server.sendHeader("Access-Control-Allow-Origin", "*");
         if (!DoorAudio::speakerReady) {
@@ -269,7 +280,7 @@ void DoorServer::registerRoutes() {
             return;
         }
         doorAudio.playBeep();
-        server.send(200, "text/plain", "Beep played");
+        server.send(200, "application/json", DoorAudio::playerJson());
     });
 
     server.on("/cam/start", HTTP_GET, []() {

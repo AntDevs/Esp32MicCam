@@ -3,6 +3,7 @@
 #include "DoorAudio.h"
 #include "DoorVideo.h"
 #include "DoorServer.h"
+#include "DoorRadar.h"
 
 void setup() {
     Serial.begin(115200);
@@ -27,10 +28,26 @@ void setup() {
 // 3. Wi-Fi, mDNS и все HTTP маршруты
     doorServer.start();
 
+// Инициализация радара (по умолчанию настроен на GPIO2 / Пин D1)
+    doorRadar.begin();
+
     Serial.println("[EXIT] setup | return: void");
 }
 
 void loop() {
     doorServer.handleClient();
+
+// Проверяем, изменилось ли состояние радара с прошлого цикла
+    if (doorRadar.hasStateChanged()) {
+        
+        if (doorRadar.isPresenceDetected()) {
+            Serial.println("[INFO] Радар: Человек обнаружен! Пробуждаем камеру.");
+            doorVideo.start();
+        } else {
+            Serial.println("[INFO] Радар: Никого нет. Камера переведена в спящий режим.");
+            doorVideo.stop();
+        }
+    }
+
     delay(2);
 }
